@@ -2,6 +2,7 @@ import type {
   ComputedPayslip,
   DepartmentSummary,
   Employee,
+  EmployeeAllowanceFlags,
   EmploymentType,
   Loan,
   ManualSalaryMode,
@@ -10,18 +11,141 @@ import type {
   PayrollReport,
   PayrollSettings,
   Period,
+  SalaryCalculationMode,
   SystemUser,
   TaxBracket,
+  UserPermissions,
   UserRole,
 } from '../types/payroll';
 
 export const EMPLOYMENT_TYPE_LABELS: Record<EmploymentType, string> = {
-  employed: 'شاغل',
+  employed: 'رسمی (شاغل)',
   retired: 'بازنشسته',
   'article-28': 'ماده ۲۸',
   'article-38': 'ماده ۳۸',
   'sherkati-soroush': 'شرکتی سروش',
+  custom: 'سایر (دستی)',
 };
+
+export const SALARY_TIER_LABELS = [
+  'تولید سیما',
+  'تامین پخش صدا',
+  'تامین و پخش سیما',
+  'تولید سیما جیم',
+  'متمرکز پاداش',
+  'تولید سیما دال',
+  'خبر',
+  'فضای مجازی',
+] as const;
+
+export type SalaryTierTuple = [
+  number,
+  number,
+  number,
+  number,
+  number,
+  number,
+  number,
+  number,
+];
+
+export const EMPLOYMENT_UNIT_OPTIONS: ReadonlyArray<string> = [
+  ...SALARY_TIER_LABELS,
+  'سیما',
+  'صدا',
+  'معاونت',
+  'مالی و اداری',
+  'فنی و مهندسی',
+];
+
+export const ALL_EMPLOYMENT_TYPES: ReadonlyArray<EmploymentType> = [
+  'employed',
+  'retired',
+  'article-28',
+  'article-38',
+  'sherkati-soroush',
+  'custom',
+];
+
+export function isOfficialOrRetiredContract(type: EmploymentType | string): boolean {
+  return type === 'employed' || type === 'retired';
+}
+
+export function splitPersianFullName(fullName: string): {
+  firstName: string;
+  lastName: string;
+} {
+  const cleaned = fullName.replace(/\s+/g, ' ').trim();
+  if (!cleaned) return { firstName: '', lastName: '' };
+  const parts = cleaned.split(' ');
+  if (parts.length === 1) {
+    return { firstName: parts[0], lastName: parts[0] };
+  }
+  return {
+    firstName: parts[0],
+    lastName: parts.slice(1).join(' '),
+  };
+}
+
+export function resolveManualSalaryUnitType(
+  employee: Pick<Employee, 'department'>,
+  paymentUnitType?: string
+): string {
+  const custom = paymentUnitType?.trim();
+  if (custom) return custom;
+  const dept = employee.department?.trim();
+  if (dept) return dept;
+  return 'سیما';
+}
+
+export const SALARY_CALCULATION_MODE_LABELS: Record<
+  SalaryCalculationMode,
+  string
+> = {
+  manual: 'ورود دستی حقوق (توافقی)',
+  fixed: 'حقوق ثابت ماهانه',
+  'daily-divided': 'تقسیم بر حقوق پایه و کارکرد روزانه',
+};
+
+export const SALARY_CALCULATION_MODE_SHORT_LABELS: Record<
+  SalaryCalculationMode,
+  string
+> = {
+  manual: 'دستی (توافقی)',
+  fixed: 'حقوق ثابت',
+  'daily-divided': 'تقسیم پایه / روزانه',
+};
+
+export const DEFAULT_ALLOWANCE_FLAGS: EmployeeAllowanceFlags = {
+  housing: true,
+  food: true,
+  marital: true,
+  child: true,
+  otherFixed: true,
+};
+
+export function normalizeAllowanceFlags(
+  flags?: Partial<EmployeeAllowanceFlags>
+): EmployeeAllowanceFlags {
+  return {
+    housing: flags?.housing ?? true,
+    food: flags?.food ?? true,
+    marital: flags?.marital ?? true,
+    child: flags?.child ?? true,
+    otherFixed: flags?.otherFixed ?? true,
+  };
+}
+
+export function getEffectiveSalaryMode(emp: Pick<Employee, 'salaryCalculationMode'>): SalaryCalculationMode {
+  if (
+    emp.salaryCalculationMode === 'manual' ||
+    emp.salaryCalculationMode === 'fixed' ||
+    emp.salaryCalculationMode === 'daily-divided'
+  ) {
+    return emp.salaryCalculationMode;
+  }
+  return 'daily-divided';
+}
 
 export const IRANIAN_BANKS: ReadonlyArray<string> = [
   'بانک ملی ایران',
@@ -76,7 +200,13 @@ export function detectBankFromSheba(accountOrSheba: string): string | null {
   return SHEBA_BANK_CODES[match[1]] ?? null;
 }
 
-export function getEmploymentTypeLabel(type: EmploymentType | string): string {
+export function getEmploymentTypeLabel(
+  type: EmploymentType | string,
+  customTitle?: string
+): string {
+  if (type === 'custom' && customTitle?.trim()) {
+    return customTitle.trim();
+  }
   return EMPLOYMENT_TYPE_LABELS[type as EmploymentType] ?? 'شاغل';
 }
 
@@ -108,6 +238,19 @@ export function formatPeriodLabel(periodKey: string): string {
   return `${monthName} ${toPersianDigits(yStr)}`;
 }
 
+export function getJalaliMonthAndYear(periodKey: string): {
+  monthName: string;
+  persianYear: string;
+} {
+  const [yStr = '1405', mStr = '01'] = periodKey.split('-');
+  const mNum = Number(mStr);
+  const monthObj = JALALI_MONTHS.find((item) => item.value === mNum);
+  return {
+    monthName: monthObj ? monthObj.label : mStr,
+    persianYear: toPersianDigits(yStr),
+  };
+}
+
 export function getPeriodDays(month: number): number {
   if (month >= 1 && month <= 6) return 31;
   if (month >= 7 && month <= 11) return 30;
@@ -133,6 +276,7 @@ export function createEmptyTimesheet(
     enteredSalary: 0,
     overtimeHours: 0,
     holidayHours: 0,
+    dayShiftHours: 0,
     nightShiftHours: 0,
     absentDays: 0,
     missionAllowance: 0,
@@ -324,11 +468,20 @@ export function calculateEmployeePayslip(
       .filter((p) => p.mode === 'additional')
       .reduce((sum, p) => sum + p.amount, 0)
   );
-  const isManualOverride = manualOverrideAmount > 0;
+  const salaryMode = getEffectiveSalaryMode(employee);
+  const allowanceFlags = normalizeAllowanceFlags(employee.allowanceFlags);
+  const isManualOverride = manualOverrideAmount > 0 || salaryMode === 'manual';
 
+  const isDailyDivided = salaryMode === 'daily-divided';
   const isSoroush = employee.employmentType === 'sherkati-soroush';
+  const usesEnteredSalaryDivision =
+    isDailyDivided &&
+    Boolean(timesheet.enteredSalary && timesheet.enteredSalary > 0);
+
   const soroushEnteredSalary =
-    isSoroush && timesheet.enteredSalary && timesheet.enteredSalary > 0
+    (isSoroush || isDailyDivided) &&
+    timesheet.enteredSalary &&
+    timesheet.enteredSalary > 0
       ? Math.round(timesheet.enteredSalary)
       : 0;
   const soroushInfo = calculateSoroushWorkDerivation(
@@ -337,25 +490,40 @@ export function calculateEmployeePayslip(
     periodDays
   );
 
+  const seniorityAllowance = Math.max(
+    0,
+    Math.round(Number(employee.seniorityAllowance) || 0)
+  );
+  const wageBaseWithSeniority = employee.baseMonthlySalary + seniorityAllowance;
+
   const dailyWage =
-    periodDays > 0 && employee.baseMonthlySalary > 0
-      ? Math.round(employee.baseMonthlySalary / periodDays)
+    periodDays > 0 && wageBaseWithSeniority > 0
+      ? Math.round(wageBaseWithSeniority / periodDays)
       : 0;
 
   const effectiveDays =
-    isSoroush && soroushInfo.usedEnteredSalary
-      ? Math.max(
-          0,
-          Math.round((soroushInfo.derivedWorkingDays - timesheet.absentDays) * 100) /
-            100
-        )
-      : Math.min(
-          periodDays,
-          Math.max(0, timesheet.workingDays - timesheet.absentDays)
-        );
+    salaryMode === 'fixed'
+      ? periodDays
+      : usesEnteredSalaryDivision && soroushInfo.usedEnteredSalary
+        ? Math.max(
+            0,
+            Math.round(
+              (soroushInfo.derivedWorkingDays - timesheet.absentDays) * 100
+            ) / 100
+          )
+        : Math.min(
+            periodDays,
+            Math.max(0, timesheet.workingDays - timesheet.absentDays)
+          );
 
   if (isManualOverride) {
-    const totalOverrideWithExtra = manualOverrideAmount + manualAdditionalPay;
+    const manualBase =
+      manualOverrideAmount > 0
+        ? manualOverrideAmount
+        : timesheet.enteredSalary && timesheet.enteredSalary > 0
+          ? Math.round(timesheet.enteredSalary)
+          : Math.round(employee.baseMonthlySalary);
+    const totalOverrideWithExtra = manualBase + manualAdditionalPay;
     return {
       employee,
       timesheet,
@@ -364,7 +532,8 @@ export function calculateEmployeePayslip(
       effectiveDays,
       dailyWage,
       soroushEnteredSalary,
-      baseSalaryEarned: manualOverrideAmount,
+      baseSalaryEarned: manualBase,
+      seniorityEarned: 0,
       housingEarned: 0,
       foodEarned: 0,
       maritalEarned: 0,
@@ -372,6 +541,7 @@ export function calculateEmployeePayslip(
       specialFixedAllowanceEarned: 0,
       overtimePay: 0,
       holidayPay: 0,
+      dayShiftPay: 0,
       nightShiftPay: 0,
       missionAllowance: 0,
       bonus: 0,
@@ -387,7 +557,7 @@ export function calculateEmployeePayslip(
       otherDeductions: 0,
       totalDeductions: 0,
       manualAdditionalPay,
-      manualOverrideAmount,
+      manualOverrideAmount: manualBase,
       isManualOverride: true,
       netPayable: totalOverrideWithExtra,
       totalEmployerCost: totalOverrideWithExtra,
@@ -395,33 +565,42 @@ export function calculateEmployeePayslip(
     };
   }
 
-  const dayRatio = periodDays > 0 ? effectiveDays / periodDays : 0;
+  const dayRatio =
+    salaryMode === 'fixed' ? 1 : periodDays > 0 ? effectiveDays / periodDays : 0;
 
   const baseSalaryEarned =
-    isSoroush && soroushInfo.usedEnteredSalary
-      ? Math.max(
-          0,
-          Math.round(soroushEnteredSalary - timesheet.absentDays * (employee.baseMonthlySalary / periodDays))
-        )
-      : Math.round(employee.baseMonthlySalary * dayRatio);
+    salaryMode === 'fixed'
+      ? Math.round(employee.baseMonthlySalary)
+      : usesEnteredSalaryDivision && soroushInfo.usedEnteredSalary
+        ? Math.max(
+            0,
+            Math.round(
+              soroushEnteredSalary -
+                timesheet.absentDays * (employee.baseMonthlySalary / periodDays)
+            )
+          )
+        : Math.round(employee.baseMonthlySalary * dayRatio);
 
   const isSpecialAllowanceContract =
     employee.employmentType === 'article-28' ||
     employee.employmentType === 'sherkati-soroush';
   const specialAllowances = settings.specialContractAllowances;
 
-  const housingEarned =
-    isSpecialAllowanceContract && specialAllowances
+  const housingEarned = !allowanceFlags.housing
+    ? 0
+    : isSpecialAllowanceContract && specialAllowances
       ? Math.round(specialAllowances.housingAllowance * dayRatio)
       : Math.round(settings.housingAllowance * dayRatio);
 
-  const foodEarned =
-    isSpecialAllowanceContract && specialAllowances
+  const foodEarned = !allowanceFlags.food
+    ? 0
+    : isSpecialAllowanceContract && specialAllowances
       ? Math.round(specialAllowances.foodAllowance * dayRatio)
       : Math.round(settings.foodAllowance * dayRatio);
 
-  const maritalEarned =
-    isSpecialAllowanceContract && specialAllowances
+  const maritalEarned = !allowanceFlags.marital
+    ? 0
+    : isSpecialAllowanceContract && specialAllowances
       ? employee.maritalStatus === 'married' ||
         specialAllowances.alwaysIncludeMaritalAndChild
         ? Math.round(specialAllowances.maritalAllowance * dayRatio)
@@ -430,8 +609,9 @@ export function calculateEmployeePayslip(
         ? Math.round(settings.maritalAllowance * dayRatio)
         : 0;
 
-  const childEarned =
-    isSpecialAllowanceContract && specialAllowances
+  const childEarned = !allowanceFlags.child
+    ? 0
+    : isSpecialAllowanceContract && specialAllowances
       ? employee.childrenCount > 0
         ? Math.round(
             specialAllowances.childAllowance * employee.childrenCount * dayRatio
@@ -445,14 +625,20 @@ export function calculateEmployeePayslip(
           )
         : 0;
 
-  const specialFixedAllowanceEarned =
-    isSpecialAllowanceContract && specialAllowances
+  const specialFixedAllowanceEarned = !allowanceFlags.otherFixed
+    ? 0
+    : isSpecialAllowanceContract && specialAllowances
       ? Math.round(specialAllowances.otherFixedAllowance * dayRatio)
       : 0;
 
+  const seniorityEarned =
+    salaryMode === 'fixed'
+      ? seniorityAllowance
+      : Math.round(seniorityAllowance * dayRatio);
+
   const hourlyRate =
     settings.standardMonthlyHours > 0
-      ? employee.baseMonthlySalary / settings.standardMonthlyHours
+      ? wageBaseWithSeniority / settings.standardMonthlyHours
       : 0;
 
   const overtimePay = Math.round(
@@ -460,6 +646,11 @@ export function calculateEmployeePayslip(
   );
   const holidayPay = Math.round(
     Math.max(0, timesheet.holidayHours) * hourlyRate * settings.holidayMultiplier
+  );
+  const dayShiftPay = Math.round(
+    Math.max(0, timesheet.dayShiftHours ?? 0) *
+      hourlyRate *
+      Math.max(0, settings.dayShiftMultiplier ?? 0.15)
   );
   const nightShiftPay = Math.round(
     Math.max(0, timesheet.nightShiftHours) * hourlyRate * settings.nightShiftMultiplier
@@ -471,6 +662,7 @@ export function calculateEmployeePayslip(
 
   const grossSalary =
     baseSalaryEarned +
+    seniorityEarned +
     housingEarned +
     foodEarned +
     maritalEarned +
@@ -478,6 +670,7 @@ export function calculateEmployeePayslip(
     specialFixedAllowanceEarned +
     overtimePay +
     holidayPay +
+    dayShiftPay +
     nightShiftPay +
     missionAllowance +
     bonus +
@@ -485,25 +678,35 @@ export function calculateEmployeePayslip(
     manualAdditionalPay;
 
   // Insurable pay excludes child/marital/mission/manual-payout in many Iranian standards or applies ceiling;
-  // here we include wage + housing + food + overtime/shift + bonus + fixed allowance
-  // capped by insuranceSalaryCeiling if > 0.
+  // here we include wage + seniority + housing + food + overtime/shift + bonus + fixed allowance
+  // capped by employee insuranceBaseCap and/or global insuranceSalaryCeiling if > 0.
   const rawInsurable =
     baseSalaryEarned +
+    seniorityEarned +
     housingEarned +
     foodEarned +
     specialFixedAllowanceEarned +
     overtimePay +
     holidayPay +
+    dayShiftPay +
     nightShiftPay +
     bonus +
     otherAllowances;
 
   const isInsuranceExempt = employee.employmentType === 'retired';
+  const empCap = Math.max(0, Math.round(Number(employee.insuranceBaseCap) || 0));
+  const globalCap = Math.max(0, Math.round(Number(settings.insuranceSalaryCeiling) || 0));
+  const effectiveInsuranceCap =
+    empCap > 0 && globalCap > 0
+      ? Math.min(empCap, globalCap)
+      : empCap > 0
+        ? empCap
+        : globalCap;
 
   const insurableSalary = isInsuranceExempt
     ? 0
-    : settings.insuranceSalaryCeiling > 0
-      ? Math.min(rawInsurable, settings.insuranceSalaryCeiling)
+    : effectiveInsuranceCap > 0
+      ? Math.min(rawInsurable, effectiveInsuranceCap)
       : rawInsurable;
 
   const employeeInsurance = isInsuranceExempt
@@ -551,6 +754,7 @@ export function calculateEmployeePayslip(
     dailyWage,
     soroushEnteredSalary,
     baseSalaryEarned,
+    seniorityEarned,
     housingEarned,
     foodEarned,
     maritalEarned,
@@ -558,6 +762,7 @@ export function calculateEmployeePayslip(
     specialFixedAllowanceEarned,
     overtimePay,
     holidayPay,
+    dayShiftPay,
     nightShiftPay,
     missionAllowance,
     bonus,
@@ -723,7 +928,10 @@ export function generatePayrollCsv(
       p.employee.workLocation,
       p.employee.mobileNumber,
       p.employee.workPhone,
-      getEmploymentTypeLabel(p.employee.employmentType),
+      getEmploymentTypeLabel(
+        p.employee.employmentType,
+        p.employee.customContractTitle
+      ),
       p.employee.bankName,
       p.employee.bankAccount,
       p.effectiveDays,
@@ -826,12 +1034,156 @@ export function validateLoanInput(input: {
 }
 
 export const USER_ROLE_LABELS: Record<UserRole, string> = {
-  admin: 'ادمین سیستم (دسترسی کامل)',
-  viewer: 'کاربر عادی (فقط مشاهده)',
+  admin: 'مدیر سیستم (دسترسی کامل)',
+  viewer: 'کاربر عادی (دسترسی سفارشی)',
 };
+
+export const DEFAULT_ADMIN_PERMISSIONS: UserPermissions = {
+  manageEmployees: true,
+  enterTimesheets: true,
+  manageLoans: true,
+  manageSettings: true,
+  enterManualSalary: true,
+  enterManualSalary2: true,
+  enterSalaryTiers: true,
+  manageBackup: true,
+  viewReports: true,
+};
+
+export const DEFAULT_VIEWER_PERMISSIONS: UserPermissions = {
+  manageEmployees: false,
+  enterTimesheets: true,
+  manageLoans: false,
+  manageSettings: false,
+  enterManualSalary: true,
+  enterManualSalary2: true,
+  enterSalaryTiers: true,
+  manageBackup: false,
+  viewReports: true,
+};
+
+export const EMPTY_USER_PERMISSIONS: UserPermissions = {
+  manageEmployees: false,
+  enterTimesheets: false,
+  manageLoans: false,
+  manageSettings: false,
+  enterManualSalary: false,
+  enterManualSalary2: false,
+  enterSalaryTiers: false,
+  manageBackup: false,
+  viewReports: false,
+};
+
+export const USER_PERMISSION_ITEMS: ReadonlyArray<{
+  key: keyof UserPermissions;
+  label: string;
+  description: string;
+}> = [
+  {
+    key: 'manageEmployees',
+    label: 'مدیریت مشخصات کارمندان',
+    description: 'ثبت کارمند جدید، ویرایش پرونده پرسنلی و تغییر وضعیت فعال/غیرفعال',
+  },
+  {
+    key: 'enterTimesheets',
+    label: 'ثبت کارکرد و متغیرهای ماهانه',
+    description: 'ورود روزهای کارکرد، اضافه‌کاری، نوبت‌کاری، کسورات و ورود اکسل صفحه ۲',
+  },
+  {
+    key: 'enterManualSalary2',
+    label: 'پرداخت حقوق دستی ۲ (صفحه ۴)',
+    description: 'مشاهده و ویرایش جدول نام و حقوق کارمندان و ورود/خروجی اکسل در ردیف ۴',
+  },
+  {
+    key: 'enterSalaryTiers',
+    label: 'ورود و خروجی اکسل ۸ ردیف حقوق (صفحه ۵)',
+    description: 'ویرایش مبالغ ردیف‌های سازمانی، ورود اکسل و ثبت نهایی در ردیف ۵',
+  },
+  {
+    key: 'manageLoans',
+    label: 'مدیریت وام و اقساط',
+    description: 'ثبت وام جدید، ویرایش، پرداخت وام، کسر قسط، توقف یا حذف وام کارمندان',
+  },
+  {
+    key: 'manageSettings',
+    label: 'تنظیمات حقوق، بیمه و مالیات',
+    description: 'ویرایش نرخ‌های قانونی، پله‌های مالیاتی و الگوهای گزارش پارامتریک',
+  },
+  {
+    key: 'manageBackup',
+    label: 'بکاپ‌گیری و استفاده از بکاپ',
+    description: 'دریافت فایل پشتیبان و بازیابی اطلاعات از فایل بکاپ در نوار پایین کنار مدیر سیستم',
+  },
+  {
+    key: 'viewReports',
+    label: 'مشاهده و خروجی گزارش‌ها',
+    description: 'مشاهده لیست حقوق، تحلیل ۸ ردیف، گزارش پارامتریک و دریافت اکسل/فیش',
+  },
+];
+
+export function getEffectiveUserPermissions(
+  user: SystemUser | null | undefined
+): UserPermissions {
+  if (!user || !user.isActive) {
+    return { ...EMPTY_USER_PERMISSIONS };
+  }
+  if (user.role === 'admin') {
+    return { ...DEFAULT_ADMIN_PERMISSIONS };
+  }
+  return {
+    ...DEFAULT_VIEWER_PERMISSIONS,
+    ...(user.permissions ?? {}),
+  };
+}
 
 export function isAdminUser(user: SystemUser | null | undefined): boolean {
   return Boolean(user && user.isActive && user.role === 'admin');
+}
+
+export function canManageEmployees(user: SystemUser | null | undefined): boolean {
+  return getEffectiveUserPermissions(user).manageEmployees;
+}
+
+export function canEnterTimesheets(user: SystemUser | null | undefined): boolean {
+  return getEffectiveUserPermissions(user).enterTimesheets;
+}
+
+export function canManageLoans(user: SystemUser | null | undefined): boolean {
+  return getEffectiveUserPermissions(user).manageLoans;
+}
+
+export function canManageSettings(user: SystemUser | null | undefined): boolean {
+  return getEffectiveUserPermissions(user).manageSettings;
+}
+
+export function canEnterManualSalary(user: SystemUser | null | undefined): boolean {
+  return getEffectiveUserPermissions(user).enterManualSalary;
+}
+
+export function canEnterManualSalary2(user: SystemUser | null | undefined): boolean {
+  return getEffectiveUserPermissions(user).enterManualSalary2;
+}
+
+export function canEnterSalaryTiers(user: SystemUser | null | undefined): boolean {
+  return getEffectiveUserPermissions(user).enterSalaryTiers;
+}
+
+export function canManageBackup(user: SystemUser | null | undefined): boolean {
+  return getEffectiveUserPermissions(user).manageBackup;
+}
+
+export function canEnterSalaries(user: SystemUser | null | undefined): boolean {
+  const perms = getEffectiveUserPermissions(user);
+  return (
+    perms.enterTimesheets ||
+    perms.enterManualSalary ||
+    perms.enterManualSalary2 ||
+    perms.enterSalaryTiers
+  );
+}
+
+export function canViewReports(user: SystemUser | null | undefined): boolean {
+  return getEffectiveUserPermissions(user).viewReports;
 }
 
 export function authenticateUser(
@@ -904,34 +1256,76 @@ export function applyManualSalaryUpdates(
     return {
       ...emp,
       baseMonthlySalary: parsed,
-      manualSalaries: [parsed, 0, 0, 0, 0],
+      manualSalaries: [parsed, 0, 0, 0, 0, 0, 0, 0],
     };
   });
 }
 
-export const SALARY_TIER_LABELS = [
-  'حقوق اول',
-  'حقوق دوم',
-  'حقوق سوم',
-  'حقوق چهارم',
-  'حقوق پنجم',
-] as const;
+
+export function normalizeCustomTierAmounts(
+  raw?: Record<string, number>
+): Record<string, number> {
+  if (!raw || typeof raw !== 'object') return {};
+  const cleaned: Record<string, number> = {};
+  for (const [k, v] of Object.entries(raw)) {
+    const label = k.replace(/\s+/g, ' ').trim();
+    const num = Math.max(0, Math.round(Number(v) || 0));
+    if (label && num > 0) {
+      cleaned[label] = (cleaned[label] ?? 0) + num;
+    }
+  }
+  return cleaned;
+}
+
+export function sumCustomTierAmounts(raw?: Record<string, number>): number {
+  if (!raw || typeof raw !== 'object') return 0;
+  return Object.values(raw).reduce(
+    (sum, n) => sum + Math.max(0, Math.round(Number(n) || 0)),
+    0
+  );
+}
+
+export function applyLoanPayment(
+  loan: Loan,
+  paymentAmount: number
+): { updatedLoan: Loan; appliedAmount: number } {
+  const safeCurrent = Math.max(0, Math.round(Number(loan.remainingBalance) || 0));
+  const requested = Math.max(0, Math.round(Number(paymentAmount) || 0));
+  if (safeCurrent <= 0 || requested <= 0 || loan.status === 'settled') {
+    return { updatedLoan: loan, appliedAmount: 0 };
+  }
+  const appliedAmount = Math.min(safeCurrent, requested);
+  const nextBalance = safeCurrent - appliedAmount;
+  return {
+    appliedAmount,
+    updatedLoan: {
+      ...loan,
+      remainingBalance: nextBalance,
+      status: nextBalance === 0 ? 'settled' : loan.status,
+    },
+  };
+}
 
 export function normalizeManualSalaries(
   items?: ReadonlyArray<number>,
-  fallbackBaseSalary = 0
-): [number, number, number, number, number] {
+  fallbackBaseSalary = 0,
+  customTierAmounts?: Record<string, number>
+): SalaryTierTuple {
+  const out: SalaryTierTuple = [0, 0, 0, 0, 0, 0, 0, 0];
   if (Array.isArray(items) && items.length > 0) {
-    const out: [number, number, number, number, number] = [0, 0, 0, 0, 0];
     let hasPositive = false;
-    for (let i = 0; i < 5; i += 1) {
+    for (let i = 0; i < SALARY_TIER_LABELS.length; i += 1) {
       const val = Math.max(0, Math.round(Number(items[i]) || 0));
       out[i] = val;
       if (val > 0) hasPositive = true;
     }
     if (hasPositive) return out;
   }
-  return [Math.max(0, Math.round(fallbackBaseSalary || 0)), 0, 0, 0, 0];
+  if (sumCustomTierAmounts(customTierAmounts) > 0) {
+    return out;
+  }
+  out[0] = Math.max(0, Math.round(fallbackBaseSalary || 0));
+  return out;
 }
 
 export function sumManualSalaries(items: ReadonlyArray<number>): number {
@@ -940,21 +1334,53 @@ export function sumManualSalaries(items: ReadonlyArray<number>): number {
 
 export function applyMultiTierManualSalaryUpdates(
   employees: Employee[],
-  salaryDrafts: Record<string, ReadonlyArray<string | number>>
+  salaryDrafts: Record<string, ReadonlyArray<string | number>>,
+  customTierDrafts?: Record<string, Record<string, string | number>>
 ): Employee[] {
   return employees.map((emp) => {
-    if (!(emp.id in salaryDrafts)) return emp;
-    const rawList = salaryDrafts[emp.id];
-    const parsedTiers: [number, number, number, number, number] = [0, 0, 0, 0, 0];
-    for (let i = 0; i < 5; i += 1) {
-      const raw = rawList[i] ?? 0;
-      const val =
-        typeof raw === 'number'
-          ? Math.max(0, Math.round(raw))
-          : parseNumericInput(raw);
-      parsedTiers[i] = Number.isFinite(val) && val > 0 ? val : 0;
+    const hasTierDraft = emp.id in salaryDrafts;
+    const hasCustomDraft = Boolean(customTierDrafts && emp.id in customTierDrafts);
+    if (!hasTierDraft && !hasCustomDraft) return emp;
+
+    const parsedTiers: SalaryTierTuple = hasTierDraft
+      ? (() => {
+          const rawList = salaryDrafts[emp.id];
+          const nextTiers: SalaryTierTuple = [0, 0, 0, 0, 0, 0, 0, 0];
+          for (let i = 0; i < SALARY_TIER_LABELS.length; i += 1) {
+            const raw = rawList[i] ?? 0;
+            const val =
+              typeof raw === 'number'
+                ? Math.max(0, Math.round(raw))
+                : parseNumericInput(raw);
+            nextTiers[i] = Number.isFinite(val) && val > 0 ? val : 0;
+          }
+          return nextTiers;
+        })()
+      : normalizeManualSalaries(
+          emp.manualSalaries,
+          emp.baseMonthlySalary,
+          emp.customTierAmounts
+        );
+
+    let nextCustom = normalizeCustomTierAmounts(emp.customTierAmounts);
+    if (hasCustomDraft && customTierDrafts) {
+      const parsedCustom: Record<string, number> = {};
+      const rawMap = customTierDrafts[emp.id] ?? {};
+      for (const [label, raw] of Object.entries(rawMap)) {
+        const cleanLabel = label.replace(/\s+/g, ' ').trim();
+        if (!cleanLabel) continue;
+        const val =
+          typeof raw === 'number'
+            ? Math.max(0, Math.round(raw))
+            : parseNumericInput(raw);
+        if (Number.isFinite(val) && val > 0) {
+          parsedCustom[cleanLabel] = val;
+        }
+      }
+      nextCustom = parsedCustom;
     }
-    const total = sumManualSalaries(parsedTiers);
+
+    const total = sumManualSalaries(parsedTiers) + sumCustomTierAmounts(nextCustom);
     if (total <= 0) {
       return emp;
     }
@@ -962,6 +1388,7 @@ export function applyMultiTierManualSalaryUpdates(
       ...emp,
       baseMonthlySalary: total,
       manualSalaries: parsedTiers,
+      customTierAmounts: nextCustom,
     };
   });
 }

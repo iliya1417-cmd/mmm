@@ -50,7 +50,7 @@ export const AuthPanel: React.FC<AuthPanelProps> = ({
             <span>احراز هویت و سطح دسترسی</span>
           </div>
           <h2 className="mt-1 text-lg font-bold text-slate-900">
-            {mode === 'page' ? 'ورود به سامانه حقوق و دستمزد' : 'تغییر حساب کاربری'}
+            {mode === 'page' ? 'ورود به سامانه حقوق شرکت مهندسی لک' : 'تغییر حساب کاربری'}
           </h2>
           <p className="text-xs text-slate-500 mt-0.5">{companyName}</p>
         </div>
@@ -71,7 +71,7 @@ export const AuthPanel: React.FC<AuthPanelProps> = ({
           <div className="px-3.5 py-2.5 bg-slate-50 border border-slate-200 rounded-md text-xs text-slate-600">
             کاربر فعلی:{' '}
             <strong className="text-slate-900">{currentUser.fullName}</strong> (
-            {currentUser.role === 'admin' ? 'ادمین سیستم' : 'کاربر عادی'})
+            {currentUser.role === 'admin' ? 'ادمین سیستم' : 'ورود حقوق و گزارش'})
           </div>
         )}
 

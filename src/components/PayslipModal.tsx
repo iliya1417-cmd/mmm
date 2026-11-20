@@ -2,9 +2,11 @@ import React from 'react';
 import { Printer, X } from 'lucide-react';
 import type { ComputedPayslip, PayrollSettings } from '../types/payroll';
 import {
+  SALARY_CALCULATION_MODE_SHORT_LABELS,
   SALARY_TIER_LABELS,
   formatMoney,
   formatPeriodLabel,
+  getEffectiveSalaryMode,
   getEmploymentTypeLabel,
   normalizeManualSalaries,
   toPersianDigits,
@@ -29,6 +31,7 @@ export const PayslipModal: React.FC<PayslipModalProps> = ({
   const nonZeroTiers = manualTiers
     .map((amount, idx) => ({ label: SALARY_TIER_LABELS[idx], amount }))
     .filter((item) => item.amount > 0);
+  const salaryMode = getEffectiveSalaryMode(employee);
 
   const earningsRows = payslip.isManualOverride
     ? [
@@ -39,6 +42,7 @@ export const PayslipModal: React.FC<PayslipModalProps> = ({
       ]
     : [
         { label: 'حقوق پایه (متناسب با کارکرد)', value: payslip.baseSalaryEarned },
+        { label: 'پایه سنوات کارکرد', value: payslip.seniorityEarned },
         { label: 'حق مسکن', value: payslip.housingEarned },
         { label: 'بن خواربار و کارگری', value: payslip.foodEarned },
         { label: 'حق تاهل (عائله‌مندی)', value: payslip.maritalEarned },
@@ -52,6 +56,7 @@ export const PayslipModal: React.FC<PayslipModalProps> = ({
         { label: 'سایر مزایای ثابت (ماده ۲۸ / سروش)', value: payslip.specialFixedAllowanceEarned },
         { label: `اضافه‌کاری (${toPersianDigits(timesheet.overtimeHours)} ساعت)`, value: payslip.overtimePay },
         { label: `تعطیل‌کاری (${toPersianDigits(timesheet.holidayHours)} ساعت)`, value: payslip.holidayPay },
+        { label: `نوبت‌کاری روز (${toPersianDigits(timesheet.dayShiftHours ?? 0)} ساعت)`, value: payslip.dayShiftPay },
         { label: `شب‌کاری (${toPersianDigits(timesheet.nightShiftHours)} ساعت)`, value: payslip.nightShiftPay },
         { label: 'حق ماموریت', value: payslip.missionAllowance },
         { label: 'پاداش و کارانه', value: payslip.bonus },
@@ -135,11 +140,18 @@ export const PayslipModal: React.FC<PayslipModalProps> = ({
               </span>
             </div>
             <div>
-              <span className="text-slate-500 block">نوع قرارداد و کارکرد</span>
+              <span className="text-slate-500 block">قرارداد، روش محاسبه و کارکرد</span>
               <span className="font-semibold text-slate-900 font-mono-num tabular-nums mt-0.5 block">
-                {getEmploymentTypeLabel(employee.employmentType)} · {toPersianDigits(payslip.effectiveDays)} روز
+                {getEmploymentTypeLabel(
+                  employee.employmentType,
+                  employee.customContractTitle
+                )}{' '}
+                · {toPersianDigits(payslip.effectiveDays)} روز
               </span>
-              {employee.employmentType === 'sherkati-soroush' && payslip.dailyWage > 0 && (
+              <span className="text-[11px] text-slate-500 block mt-0.5">
+                {SALARY_CALCULATION_MODE_SHORT_LABELS[salaryMode]}
+              </span>
+              {payslip.dailyWage > 0 && (
                 <span className="text-[11px] text-teal-800 font-mono-num tabular-nums mt-0.5 block">
                   نرخ روزانه: {formatMoney(payslip.dailyWage)} {settings.currency}
                 </span>
@@ -220,6 +232,12 @@ export const PayslipModal: React.FC<PayslipModalProps> = ({
                 <span className="font-mono-num tabular-nums font-medium text-slate-800">
                   {formatMoney(payslip.employerInsurance)} {settings.currency}
                 </span>
+                {employee.insuranceBaseCap && employee.insuranceBaseCap > 0 && (
+                  <span className="mr-2 text-[11px] text-amber-800 font-mono-num tabular-nums">
+                    (مبنای سقف بیمه فرد: {formatMoney(employee.insuranceBaseCap)}{' '}
+                    {settings.currency})
+                  </span>
+                )}
                 {payslip.activeLoansRemainingAfter > 0 && (
                   <>
                     <span className="mx-2 text-slate-300" aria-hidden="true">
@@ -247,7 +265,7 @@ export const PayslipModal: React.FC<PayslipModalProps> = ({
               )}
               {!payslip.isManualOverride && nonZeroTiers.length > 1 && (
                 <div>
-                  ترکیب حقوق دستی:{' '}
+                  ترکیب ۸ ردیف حقوق:{' '}
                   <span className="font-mono-num tabular-nums text-slate-800">
                     {nonZeroTiers
                       .map((t) => `${t.label}: ${formatMoney(t.amount)}`)

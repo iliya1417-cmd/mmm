@@ -1,14 +1,18 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Banknote,
   BarChart3,
   ClipboardEdit,
+  Download,
+  Layers,
   Lock,
   LogOut,
   Menu,
-  RotateCcw,
+  Moon,
   Settings2,
   Shield,
+  Sun,
+  TableProperties,
+  Upload,
   UserCog,
   Users,
   X,
@@ -18,36 +22,46 @@ import type {
   Employee,
   Loan,
   LoanStatus,
-  ManualSalaryPayment,
   MonthlyTimesheet,
   PageId,
-  ParametricReportTemplate,
   PayrollSettings,
   SystemUser,
 } from './types/payroll';
 import {
   JALALI_MONTHS,
+  USER_PERMISSION_ITEMS,
+  applyLoanPayment,
   applyMultiTierManualSalaryUpdates,
   calculatePayrollReport,
   createEmptyTimesheet,
   formatPeriodKey,
+  getEffectiveUserPermissions,
   getMonthFromPeriodKey,
   getPeriodDays,
   isAdminUser,
   toPersianDigits,
 } from './utils/payroll';
-import { loadAppState, resetAppStateToSeed, saveAppState } from './utils/storage';
-import { EmployeesPage } from './components/EmployeesPage';
 import {
-  PayrollDataPage,
-  type PayrollDataTab,
-} from './components/PayrollDataPage';
+  exportAppStateToJson,
+  loadAppState,
+  parseAppStateFromJson,
+  saveAppState,
+} from './utils/storage';
+import { EmployeesPage } from './components/EmployeesPage';
+import { PayrollDataPage } from './components/PayrollDataPage';
 import {
   LoansSettingsPage,
   type LoansSettingsTab,
 } from './components/LoansSettingsPage';
+import { ManualSalary2Page } from './components/ManualSalary2Page';
+import { SalaryTiersPage } from './components/SalaryTiersPage';
 import { ReportsPage } from './components/ReportsPage';
 import { AuthPanel } from './components/AuthModal';
+import {
+  upsertManualPaymentsForPeriod,
+  type ManualSalary2RowUpdate,
+} from './utils/manualSalary2';
+import { syncEmployeesTiersFromManualPayments } from './utils/tierExtraction';
 
 interface NavItem {
   id: PageId;
@@ -62,26 +76,40 @@ const NAV_ITEMS: NavItem[] = [
     id: 'employees',
     step: '۱',
     label: 'مشخصات کارمندان',
-    subtitle: 'پرونده پرسنلی و حقوق پایه',
+    subtitle: 'پرونده پرسنلی و قراردادها',
     icon: Users,
   },
   {
     id: 'payroll-data',
     step: '۲',
     label: 'مقدار اطلاعات',
-    subtitle: 'کارکرد، اضافه‌کاری و مساعده',
+    subtitle: 'کارکرد متغیر ماهانه و اضافه‌کاری',
     icon: ClipboardEdit,
   },
   {
     id: 'loans-settings',
     step: '۳',
     label: 'وام و تنظیمات',
-    subtitle: 'مدیریت اقساط، بیمه و مالیات',
+    subtitle: 'مدیریت اقساط، بیمه و کاربران',
     icon: Settings2,
   },
   {
-    id: 'reports',
+    id: 'manual-salary-2',
     step: '۴',
+    label: 'پرداخت حقوق دستی ۲',
+    subtitle: 'جدول نام و حقوق کارمندان و اکسل',
+    icon: TableProperties,
+  },
+  {
+    id: 'salary-tiers',
+    step: '۵',
+    label: 'پرداخت و مقدار حقوق (۸ ردیف)',
+    subtitle: 'ردیف‌های سازمانی و ورود/خروجی اکسل',
+    icon: Layers,
+  },
+  {
+    id: 'reports',
+    step: '۶',
     label: 'گزارش‌دهی',
     subtitle: 'لیست حقوق، فیش و خروجی',
     icon: BarChart3,
@@ -89,22 +117,49 @@ const NAV_ITEMS: NavItem[] = [
 ];
 
 const AVAILABLE_YEARS = [1403, 1404, 1405, 1406];
+const THEME_STORAGE_KEY = 'persian_payroll_theme_v1';
+type ThemeMode = 'light' | 'dark';
 
 export default function App() {
   const [appState, setAppState] = useState<AppState>(() => loadAppState());
+  const [theme, setTheme] = useState<ThemeMode>(() => {
+    try {
+      const saved = localStorage.getItem(THEME_STORAGE_KEY);
+      return saved === 'dark' ? 'dark' : 'light';
+    } catch {
+      return 'light';
+    }
+  });
   const [activePage, setActivePage] = useState<PageId>('employees');
-  const [payrollDataTab, setPayrollDataTab] = useState<PayrollDataTab | null>(
-    null
-  );
   const [loansSettingsTab, setLoansSettingsTab] = useState<LoansSettingsTab | null>(
     null
   );
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+  const [backupNotice, setBackupNotice] = useState<{
+    type: 'success' | 'error';
+    message: string;
+  } | null>(null);
+  const backupFileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     saveAppState(appState);
   }, [appState]);
+
+  useEffect(() => {
+    const root = document.documentElement;
+    root.classList.toggle('dark', theme === 'dark');
+    root.setAttribute('data-theme', theme);
+    try {
+      localStorage.setItem(THEME_STORAGE_KEY, theme);
+    } catch {
+      // ignore storage errors
+    }
+  }, [theme]);
+
+  const toggleTheme = () => {
+    setTheme((prev) => (prev === 'dark' ? 'light' : 'dark'));
+  };
 
   const currentUser = useMemo(
     () =>
@@ -117,6 +172,29 @@ export default function App() {
   );
 
   const isAdmin = isAdminUser(currentUser);
+  const userPermissions = useMemo(
+    () => getEffectiveUserPermissions(currentUser),
+    [currentUser]
+  );
+  const {
+    manageEmployees: canEmp,
+    enterTimesheets: canTimesheet,
+    manageLoans: canLoan,
+    manageSettings: canSettings,
+    enterManualSalary2: canManual2,
+    enterSalaryTiers: canTiers,
+    manageBackup: canBackup,
+    viewReports: canReports,
+  } = userPermissions;
+
+  const grantedPermissionSummary = useMemo(() => {
+    const enabled = USER_PERMISSION_ITEMS.filter(
+      (item) => userPermissions[item.key]
+    ).map((item) => item.label);
+    return enabled.length > 0
+      ? enabled.join('، ')
+      : 'بدون مجوز عملیات (فقط مشاهده اولیه)';
+  }, [userPermissions]);
 
   const periodKey = formatPeriodKey(appState.selectedPeriod);
 
@@ -142,7 +220,7 @@ export default function App() {
   );
 
   const handleAddEmployee = (empData: Omit<Employee, 'id'>) => {
-    if (!isAdmin) return;
+    if (!canEmp) return;
     const newEmployee: Employee = {
       ...empData,
       id: `emp-${Date.now()}`,
@@ -154,7 +232,7 @@ export default function App() {
   };
 
   const handleUpdateEmployee = (updated: Employee) => {
-    if (!isAdmin) return;
+    if (!canEmp) return;
     setAppState((prev) => ({
       ...prev,
       employees: prev.employees.map((e) => (e.id === updated.id ? updated : e)),
@@ -162,55 +240,80 @@ export default function App() {
   };
 
   const handleBatchUpdateSalaries = (
-    salaryDrafts: Record<string, ReadonlyArray<string | number>>
+    salaryDrafts: Record<string, ReadonlyArray<string | number>>,
+    customTierDrafts?: Record<string, Record<string, string | number>>
   ) => {
-    if (!isAdmin) return;
+    if (!canTiers) return;
     setAppState((prev) => ({
       ...prev,
-      employees: applyMultiTierManualSalaryUpdates(prev.employees, salaryDrafts),
-    }));
-  };
-
-  const handleDeleteEmployee = (id: string) => {
-    if (!isAdmin) return;
-    setAppState((prev) => ({
-      ...prev,
-      employees: prev.employees.filter((e) => e.id !== id),
-      timesheets: prev.timesheets.filter((t) => t.employeeId !== id),
-      loans: prev.loans.filter((l) => l.employeeId !== id),
-      manualPayments: (prev.manualPayments ?? []).filter(
-        (p) => p.employeeId !== id
+      employees: applyMultiTierManualSalaryUpdates(
+        prev.employees,
+        salaryDrafts,
+        customTierDrafts
       ),
     }));
   };
 
-  const handleAddManualPayment = (
-    paymentData: Omit<ManualSalaryPayment, 'id' | 'createdAt'>
-  ) => {
-    if (!isAdmin) return;
-    const newPayment: ManualSalaryPayment = {
-      ...paymentData,
-      id: `mpay-${Date.now()}`,
-      createdAt: `${toPersianDigits(appState.selectedPeriod.year)}/${toPersianDigits(
-        String(appState.selectedPeriod.month).padStart(2, '0')
-      )}/01`,
-    };
+  const handleImportEmployees = (updatedEmployees: Employee[]) => {
+    if (!canTiers) return;
+    setAppState((prev) => {
+      if (canEmp) {
+        return {
+          ...prev,
+          employees: updatedEmployees,
+        };
+      }
+      const byId = new Map(updatedEmployees.map((u) => [u.id, u]));
+      return {
+        ...prev,
+        employees: prev.employees.map((existing) => {
+          const next = byId.get(existing.id);
+          if (!next) return existing;
+          return {
+            ...existing,
+            baseMonthlySalary: next.baseMonthlySalary,
+            manualSalaries: next.manualSalaries,
+            customTierAmounts: next.customTierAmounts,
+          };
+        }),
+      };
+    });
+  };
+
+  const handleImportEmployeesBatch = (nextEmployees: Employee[]) => {
+    if (!canEmp) return;
     setAppState((prev) => ({
       ...prev,
-      manualPayments: [...(prev.manualPayments ?? []), newPayment],
+      employees: nextEmployees,
     }));
   };
 
-  const handleDeleteManualPayment = (paymentId: string) => {
-    if (!isAdmin) return;
-    setAppState((prev) => ({
-      ...prev,
-      manualPayments: (prev.manualPayments ?? []).filter((p) => p.id !== paymentId),
-    }));
+  const handleUpsertManualSalary2 = (updates: ManualSalary2RowUpdate[]) => {
+    if (!canManual2 || updates.length === 0) return;
+    setAppState((prev) => {
+      const nextManualPayments = upsertManualPaymentsForPeriod(
+        prev.manualPayments ?? [],
+        periodKey,
+        updates
+      );
+      const clearedIds = updates
+        .filter((u) => u.amount <= 0)
+        .map((u) => u.employeeId);
+      return {
+        ...prev,
+        manualPayments: nextManualPayments,
+        employees: syncEmployeesTiersFromManualPayments(
+          prev.employees,
+          nextManualPayments,
+          periodKey,
+          clearedIds
+        ),
+      };
+    });
   };
 
   const handleToggleEmployeeActive = (id: string) => {
-    if (!isAdmin) return;
+    if (!canEmp) return;
     setAppState((prev) => ({
       ...prev,
       employees: prev.employees.map((e) =>
@@ -220,7 +323,7 @@ export default function App() {
   };
 
   const handleUpsertTimesheet = (timesheet: MonthlyTimesheet) => {
-    if (!isAdmin) return;
+    if (!canTimesheet) return;
     setAppState((prev) => {
       const exists = prev.timesheets.some((t) => t.id === timesheet.id);
       return {
@@ -232,8 +335,22 @@ export default function App() {
     });
   };
 
+  const handleBatchUpsertTimesheets = (timesheets: MonthlyTimesheet[]) => {
+    if (!canTimesheet || timesheets.length === 0) return;
+    setAppState((prev) => {
+      const nextMap = new Map(prev.timesheets.map((t) => [t.id, t]));
+      for (const ts of timesheets) {
+        nextMap.set(ts.id, ts);
+      }
+      return {
+        ...prev,
+        timesheets: Array.from(nextMap.values()),
+      };
+    });
+  };
+
   const handleFillStandardMonth = () => {
-    if (!isAdmin) return;
+    if (!canTimesheet) return;
     const standardDays = getPeriodDays(getMonthFromPeriodKey(periodKey));
     setAppState((prev) => {
       const nextTimesheets = [...prev.timesheets];
@@ -262,7 +379,7 @@ export default function App() {
   };
 
   const handleAddLoan = (loanData: Omit<Loan, 'id' | 'createdAt'>) => {
-    if (!isAdmin) return;
+    if (!canLoan) return;
     const newLoan: Loan = {
       ...loanData,
       id: `loan-${Date.now()}`,
@@ -276,8 +393,26 @@ export default function App() {
     }));
   };
 
+  const handleUpdateLoan = (updatedLoan: Loan) => {
+    if (!canLoan) return;
+    setAppState((prev) => ({
+      ...prev,
+      loans: prev.loans.map((l) => (l.id === updatedLoan.id ? updatedLoan : l)),
+    }));
+  };
+
+  const handlePayLoan = (loanId: string, amount: number) => {
+    if (!canLoan || amount <= 0) return;
+    setAppState((prev) => ({
+      ...prev,
+      loans: prev.loans.map((l) =>
+        l.id === loanId ? applyLoanPayment(l, amount).updatedLoan : l
+      ),
+    }));
+  };
+
   const handleUpdateLoanStatus = (loanId: string, status: LoanStatus) => {
-    if (!isAdmin) return;
+    if (!canLoan) return;
     setAppState((prev) => ({
       ...prev,
       loans: prev.loans.map((l) => (l.id === loanId ? { ...l, status } : l)),
@@ -285,23 +420,18 @@ export default function App() {
   };
 
   const handleRecordLoanInstallment = (loanId: string) => {
-    if (!isAdmin) return;
+    if (!canLoan) return;
     setAppState((prev) => ({
       ...prev,
       loans: prev.loans.map((l) => {
         if (l.id !== loanId || l.status === 'settled') return l;
-        const nextBalance = Math.max(0, l.remainingBalance - l.monthlyInstallment);
-        return {
-          ...l,
-          remainingBalance: nextBalance,
-          status: nextBalance === 0 ? 'settled' : l.status,
-        };
+        return applyLoanPayment(l, l.monthlyInstallment).updatedLoan;
       }),
     }));
   };
 
   const handleDeleteLoan = (loanId: string) => {
-    if (!isAdmin) return;
+    if (!canLoan) return;
     setAppState((prev) => ({
       ...prev,
       loans: prev.loans.filter((l) => l.id !== loanId),
@@ -309,7 +439,7 @@ export default function App() {
   };
 
   const handleUpdateSettings = (settings: PayrollSettings) => {
-    if (!isAdmin) return;
+    if (!canSettings) return;
     setAppState((prev) => ({
       ...prev,
       settings,
@@ -361,15 +491,68 @@ export default function App() {
       currentUserId: null,
     }));
     setActivePage('employees');
-    setPayrollDataTab(null);
     setLoansSettingsTab(null);
     setMobileMenuOpen(false);
   };
 
-  const handleResetDemoData = () => {
-    if (!isAdmin) return;
-    const fresh = resetAppStateToSeed();
-    setAppState(fresh);
+  const handleImportState = (imported: AppState) => {
+    if (!canBackup) return;
+    setAppState({
+      ...imported,
+      users:
+        Array.isArray(imported.users) && imported.users.length > 0
+          ? imported.users
+          : appState.users,
+      currentUserId: appState.currentUserId,
+      parametricTemplates: Array.isArray(imported.parametricTemplates)
+        ? imported.parametricTemplates
+        : appState.parametricTemplates ?? [],
+    });
+  };
+
+  const handleHeaderBackupDownload = () => {
+    if (!canBackup) return;
+    const json = exportAppStateToJson(appState);
+    const blob = new Blob([json], { type: 'application/json;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `lak-payroll-backup-${periodKey}.json`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+    setBackupNotice({
+      type: 'success',
+      message: `فایل پشتیبان کامل دوره ${toPersianDigits(periodKey)} با موفقیت ذخیره شد.`,
+    });
+    window.setTimeout(() => setBackupNotice(null), 3500);
+  };
+
+  const handleHeaderBackupRestore = (
+    e: React.ChangeEvent<HTMLInputElement>
+  ) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file || !canBackup) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = parseAppStateFromJson(String(reader.result));
+      if (!result.state) {
+        setBackupNotice({
+          type: 'error',
+          message: result.error ?? 'ساختار فایل پشتیبان معتبر نیست.',
+        });
+        return;
+      }
+      handleImportState(result.state);
+      setBackupNotice({
+        type: 'success',
+        message: 'اطلاعات فایل بکاپ با موفقیت در کل سامانه بازیابی شد.',
+      });
+      window.setTimeout(() => setBackupNotice(null), 3500);
+    };
+    reader.readAsText(file);
   };
 
   const currentNav = NAV_ITEMS.find((n) => n.id === activePage) ?? NAV_ITEMS[0];
@@ -378,16 +561,7 @@ export default function App() {
     if (pageId !== 'loans-settings') {
       setLoansSettingsTab(null);
     }
-    if (pageId !== 'payroll-data') {
-      setPayrollDataTab(null);
-    }
     setActivePage(pageId);
-    setMobileMenuOpen(false);
-  };
-
-  const openManualSalarySection = () => {
-    setPayrollDataTab('manual-salary');
-    setActivePage('payroll-data');
     setMobileMenuOpen(false);
   };
 
@@ -399,13 +573,34 @@ export default function App() {
 
   if (!currentUser) {
     return (
-      <AuthPanel
-        mode="page"
-        companyName={appState.settings.companyName}
-        users={appState.users}
-        currentUser={null}
-        onLogin={handleLogin}
-      />
+      <div className="relative">
+        <button
+          type="button"
+          onClick={toggleTheme}
+          aria-pressed={theme === 'dark'}
+          aria-label="تغییر زمینه روز و شب"
+          className="fixed top-4 left-4 z-50 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-white border border-slate-200 text-slate-700 hover:bg-slate-100 rounded-md shadow-sm transition-colors"
+        >
+          {theme === 'dark' ? (
+            <>
+              <Sun className="w-3.5 h-3.5 text-amber-500" aria-hidden="true" />
+              <span>زمینه روز</span>
+            </>
+          ) : (
+            <>
+              <Moon className="w-3.5 h-3.5 text-indigo-600" aria-hidden="true" />
+              <span>زمینه شب</span>
+            </>
+          )}
+        </button>
+        <AuthPanel
+          mode="page"
+          companyName={appState.settings.companyName}
+          users={appState.users}
+          currentUser={null}
+          onLogin={handleLogin}
+        />
+      </div>
     );
   }
 
@@ -413,15 +608,15 @@ export default function App() {
     <div className="min-h-screen bg-slate-50 text-slate-900 flex flex-col lg:flex-row">
       {/* Desktop Sidebar */}
       <aside
-        className="hidden lg:flex lg:flex-col lg:w-64 lg:shrink-0 bg-white border-l border-slate-200 min-h-screen no-print"
+        className="hidden lg:flex lg:flex-col lg:w-72 lg:shrink-0 bg-white border-l border-slate-200 min-h-screen no-print"
         aria-label="منوی اصلی سامانه"
       >
         <div className="px-5 py-5 border-b border-slate-200">
           <div className="text-base font-bold text-slate-900 tracking-tight whitespace-nowrap">
-            دفتر حقوق و دستمزد
+            شرکت مهندسی لک
           </div>
           <div className="mt-1 text-xs text-slate-500 truncate">
-            {appState.settings.companyName}
+            سامانه جامع حقوق و دستمزد
           </div>
         </div>
 
@@ -448,7 +643,7 @@ export default function App() {
                   aria-hidden={true}
                 />
                 <div className="min-w-0">
-                  <div className="text-sm font-semibold whitespace-nowrap">
+                  <div className="text-[13px] font-semibold leading-snug">
                     {item.step}. {item.label}
                   </div>
                   <div className="text-xs text-slate-500 mt-0.5 truncate">
@@ -458,45 +653,18 @@ export default function App() {
               </button>
             );
           })}
-
-          <div className="pt-2 mt-2 border-t border-slate-200">
-            <button
-              type="button"
-              onClick={openManualSalarySection}
-              className={`w-full flex items-start gap-3 px-3.5 py-3 rounded-md text-right transition-colors ${
-                activePage === 'payroll-data' && payrollDataTab === 'manual-salary'
-                  ? 'bg-teal-700 text-white'
-                  : 'text-teal-900 bg-teal-50/70 hover:bg-teal-100/80 border border-teal-200'
-              }`}
-            >
-              <Banknote
-                className={`w-4 h-4 mt-0.5 shrink-0 ${
-                  activePage === 'payroll-data' && payrollDataTab === 'manual-salary'
-                    ? 'text-white'
-                    : 'text-teal-700'
-                }`}
-                aria-hidden={true}
-              />
-              <div className="min-w-0">
-                <div className="text-sm font-semibold whitespace-nowrap">
-                  پرداخت حقوق دستی
-                </div>
-                <div
-                  className={`text-xs mt-0.5 truncate ${
-                    activePage === 'payroll-data' && payrollDataTab === 'manual-salary'
-                      ? 'text-teal-100'
-                      : 'text-teal-700/80'
-                  }`}
-                >
-                  ثبت و پرداخت مستقیم حقوق
-                </div>
-              </div>
-            </button>
-          </div>
         </nav>
 
-        <div className="p-4 border-t border-slate-200 space-y-3">
-          {/* Active User & Role Card */}
+        <div className="p-3.5 border-t border-slate-200 space-y-2.5">
+          {/* Backup & Restore Controls placed neatly alongside System Admin card */}
+          <input
+            ref={backupFileInputRef}
+            type="file"
+            accept="application/json,.json"
+            onChange={handleHeaderBackupRestore}
+            className="hidden"
+            aria-label="انتخاب فایل بکاپ برای بازیابی"
+          />
           <div className="bg-slate-50 border border-slate-200 rounded-md p-3 space-y-2.5">
             <div className="flex items-start justify-between gap-2">
               <div className="min-w-0">
@@ -509,9 +677,32 @@ export default function App() {
                   }`}
                 >
                   <Shield className="w-3 h-3 shrink-0" aria-hidden="true" />
-                  <span>{isAdmin ? 'ادمین سیستم' : 'کاربر عادی (فقط مشاهده)'}</span>
+                  <span>{isAdmin ? 'مدیر سیستم (دسترسی کامل)' : 'کاربر دسترسی سفارشی'}</span>
                 </div>
               </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-1.5">
+              <button
+                type="button"
+                disabled={!canBackup}
+                onClick={handleHeaderBackupDownload}
+                title="دریافت فایل پشتیبان کامل سامانه (JSON)"
+                className="inline-flex items-center justify-center gap-1 px-2 py-1.5 text-[11px] font-medium text-teal-800 bg-teal-50 hover:bg-teal-100 border border-teal-200 disabled:opacity-45 disabled:cursor-not-allowed rounded transition-colors whitespace-nowrap"
+              >
+                <Download className="w-3 h-3 shrink-0" aria-hidden="true" />
+                <span>بکاپ‌گیری</span>
+              </button>
+              <button
+                type="button"
+                disabled={!canBackup}
+                onClick={() => backupFileInputRef.current?.click()}
+                title="بازیابی اطلاعات سامانه از فایل بکاپ"
+                className="inline-flex items-center justify-center gap-1 px-2 py-1.5 text-[11px] font-medium text-slate-700 bg-white hover:bg-slate-100 border border-slate-200 disabled:opacity-45 disabled:cursor-not-allowed rounded transition-colors whitespace-nowrap"
+              >
+                <Upload className="w-3 h-3 shrink-0" aria-hidden="true" />
+                <span>استفاده از بکاپ</span>
+              </button>
             </div>
 
             <div className="flex items-center gap-1.5">
@@ -538,23 +729,12 @@ export default function App() {
               <button
                 type="button"
                 onClick={openUsersManagement}
-                className="w-full text-[11px] font-medium text-teal-800 hover:text-teal-950 text-right pt-1 border-t border-slate-200"
+                className="w-full text-[11px] font-medium text-teal-800 hover:text-teal-950 text-right pt-1.5 border-t border-slate-200"
               >
-                تعریف و مدیریت کاربران ({toPersianDigits(appState.users.length)} کاربر)
+                تعریف و سطح دسترسی کاربران ({toPersianDigits(appState.users.length)} کاربر)
               </button>
             )}
           </div>
-
-          {isAdmin && (
-            <button
-              type="button"
-              onClick={handleResetDemoData}
-              className="w-full inline-flex items-center justify-center gap-2 px-3 py-2 text-xs font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-md transition-colors"
-            >
-              <RotateCcw className="w-3.5 h-3.5" aria-hidden="true" />
-              <span>بازنشانی داده‌های نمونه</span>
-            </button>
-          )}
         </div>
       </aside>
 
@@ -569,7 +749,7 @@ export default function App() {
           <aside className="relative w-72 max-w-[85vw] bg-white border-l border-slate-200 h-full flex flex-col z-10">
             <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between">
               <span className="text-base font-bold text-slate-900">
-                دفتر حقوق و دستمزد
+                شرکت مهندسی لک
               </span>
               <button
                 type="button"
@@ -607,21 +787,36 @@ export default function App() {
                   </button>
                 );
               })}
-
-              <div className="pt-2 mt-2 border-t border-slate-200">
+            </nav>
+            <div className="p-4 border-t border-slate-200 space-y-2.5">
+              <div className="text-xs font-semibold text-slate-800">
+                {currentUser.fullName} ({isAdmin ? 'مدیر سیستم' : 'دسترسی سفارشی'})
+              </div>
+              <div className="grid grid-cols-2 gap-1.5">
                 <button
                   type="button"
-                  onClick={openManualSalarySection}
-                  className="w-full flex items-center gap-3 px-3.5 py-3 rounded-md text-right text-teal-900 bg-teal-50 hover:bg-teal-100 border border-teal-200 transition-colors"
+                  disabled={!canBackup}
+                  onClick={() => {
+                    setMobileMenuOpen(false);
+                    handleHeaderBackupDownload();
+                  }}
+                  className="inline-flex items-center justify-center gap-1 px-2 py-1.5 text-[11px] font-medium text-teal-800 bg-teal-50 hover:bg-teal-100 border border-teal-200 disabled:opacity-45 rounded"
                 >
-                  <Banknote className="w-4 h-4 shrink-0 text-teal-700" aria-hidden={true} />
-                  <span className="text-sm font-semibold">پرداخت حقوق دستی</span>
+                  <Download className="w-3 h-3 shrink-0" aria-hidden="true" />
+                  <span>بکاپ‌گیری</span>
                 </button>
-              </div>
-            </nav>
-            <div className="p-4 border-t border-slate-200 space-y-2">
-              <div className="text-xs font-semibold text-slate-800">
-                {currentUser.fullName} ({isAdmin ? 'ادمین سیستم' : 'فقط مشاهده'})
+                <button
+                  type="button"
+                  disabled={!canBackup}
+                  onClick={() => {
+                    setMobileMenuOpen(false);
+                    backupFileInputRef.current?.click();
+                  }}
+                  className="inline-flex items-center justify-center gap-1 px-2 py-1.5 text-[11px] font-medium text-slate-700 bg-white hover:bg-slate-100 border border-slate-200 disabled:opacity-45 rounded"
+                >
+                  <Upload className="w-3 h-3 shrink-0" aria-hidden="true" />
+                  <span>استفاده از بکاپ</span>
+                </button>
               </div>
               <div className="flex items-center gap-2">
                 <button
@@ -642,16 +837,6 @@ export default function App() {
                   خروج
                 </button>
               </div>
-              {isAdmin && (
-                <button
-                  type="button"
-                  onClick={handleResetDemoData}
-                  className="w-full inline-flex items-center justify-center gap-2 px-3 py-2 text-xs font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-md"
-                >
-                  <RotateCcw className="w-3.5 h-3.5" aria-hidden="true" />
-                  <span>بازنشانی داده‌های نمونه</span>
-                </button>
-              )}
             </div>
           </aside>
         </div>
@@ -660,7 +845,7 @@ export default function App() {
       {/* Main Content Area */}
       <div className="flex-1 min-w-0 flex flex-col">
         {/* Top Bar Contract */}
-        <header className="bg-white border-b border-slate-200 px-4 sm:px-8 py-3.5 flex items-center justify-between gap-4 no-print">
+        <header className="bg-white border-b border-slate-200 px-4 sm:px-8 py-3.5 flex flex-wrap items-center justify-between gap-3 no-print">
           <div className="flex items-center gap-3 min-w-0">
             <button
               type="button"
@@ -672,7 +857,7 @@ export default function App() {
             </button>
             <div className="min-w-0">
               <div className="text-xs text-slate-500 hidden sm:block">
-                حسابداری حقوق و دستمزد <span className="mx-1">/</span> صفحه{' '}
+                شرکت مهندسی لک <span className="mx-1">/</span> صفحه{' '}
                 {currentNav.step}
               </div>
               <h1 className="text-base sm:text-lg font-bold text-slate-900 truncate">
@@ -681,8 +866,36 @@ export default function App() {
             </div>
           </div>
 
-          {/* Period Selector + Quick Switch User */}
-          <div className="flex items-center gap-2 shrink-0">
+          {/* Top Bar Controls: Theme + Period Selector + User Switch */}
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+
+            <button
+              type="button"
+              onClick={toggleTheme}
+              aria-pressed={theme === 'dark'}
+              aria-label="تغییر زمینه روز و شب"
+              title={
+                theme === 'dark'
+                  ? 'تغییر به زمینه روشن (روز)'
+                  : 'تغییر به زمینه تیره (شب)'
+              }
+              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-white hover:bg-slate-100 border border-slate-200 rounded-md transition-colors whitespace-nowrap"
+            >
+              {theme === 'dark' ? (
+                <>
+                  <Sun className="w-3.5 h-3.5 text-amber-500" aria-hidden="true" />
+                  <span>زمینه روز</span>
+                </>
+              ) : (
+                <>
+                  <Moon className="w-3.5 h-3.5 text-indigo-600" aria-hidden="true" />
+                  <span>زمینه شب</span>
+                </>
+              )}
+            </button>
+
+            <span className="hidden sm:inline-block h-5 w-px bg-slate-200 mx-0.5" aria-hidden="true" />
+
             <label htmlFor="period-month" className="text-xs text-slate-500 hidden sm:inline">
               دوره مالی:
             </label>
@@ -691,13 +904,22 @@ export default function App() {
               aria-label="انتخاب ماه دوره مالی"
               value={appState.selectedPeriod.month}
               onChange={(e) =>
-                setAppState((prev) => ({
-                  ...prev,
-                  selectedPeriod: {
+                setAppState((prev) => {
+                  const nextPeriod = {
                     ...prev.selectedPeriod,
                     month: Number(e.target.value),
-                  },
-                }))
+                  };
+                  const nextPeriodKey = formatPeriodKey(nextPeriod);
+                  return {
+                    ...prev,
+                    selectedPeriod: nextPeriod,
+                    employees: syncEmployeesTiersFromManualPayments(
+                      prev.employees,
+                      prev.manualPayments ?? [],
+                      nextPeriodKey
+                    ),
+                  };
+                })
               }
               className="px-2.5 py-1.5 text-sm border border-slate-200 rounded-md bg-white text-slate-800 focus:outline-none focus:ring-2 focus:ring-teal-600/20 focus:border-teal-600"
             >
@@ -712,13 +934,22 @@ export default function App() {
               aria-label="انتخاب سال دوره مالی"
               value={appState.selectedPeriod.year}
               onChange={(e) =>
-                setAppState((prev) => ({
-                  ...prev,
-                  selectedPeriod: {
+                setAppState((prev) => {
+                  const nextPeriod = {
                     ...prev.selectedPeriod,
                     year: Number(e.target.value),
-                  },
-                }))
+                  };
+                  const nextPeriodKey = formatPeriodKey(nextPeriod);
+                  return {
+                    ...prev,
+                    selectedPeriod: nextPeriod,
+                    employees: syncEmployeesTiersFromManualPayments(
+                      prev.employees,
+                      prev.manualPayments ?? [],
+                      nextPeriodKey
+                    ),
+                  };
+                })
               }
               className="px-2.5 py-1.5 text-sm border border-slate-200 rounded-md bg-white text-slate-800 font-mono-num tabular-nums focus:outline-none focus:ring-2 focus:ring-teal-600/20 focus:border-teal-600"
             >
@@ -744,6 +975,27 @@ export default function App() {
 
         {/* Page Viewport */}
         <main className="flex-1 p-4 sm:p-6 lg:p-8 max-w-[1440px] w-full mx-auto space-y-5">
+          {backupNotice && (
+            <div
+              role={backupNotice.type === 'error' ? 'alert' : 'status'}
+              className={`rounded-lg px-4 py-2.5 text-xs flex items-center justify-between gap-2 border no-print ${
+                backupNotice.type === 'success'
+                  ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                  : 'bg-rose-50 border-rose-200 text-rose-800'
+              }`}
+            >
+              <span>{backupNotice.message}</span>
+              <button
+                type="button"
+                onClick={() => setBackupNotice(null)}
+                aria-label="بستن پیام بکاپ"
+                className="p-1 hover:opacity-75"
+              >
+                <X className="w-3.5 h-3.5" aria-hidden="true" />
+              </button>
+            </div>
+          )}
+
           {!isAdmin && (
             <div
               role="status"
@@ -752,7 +1004,8 @@ export default function App() {
               <div className="flex items-center gap-2">
                 <Lock className="w-4 h-4 text-amber-700 shrink-0" aria-hidden="true" />
                 <span>
-                  حالت فقط مشاهده: شما با حساب <strong>{currentUser.fullName}</strong> وارد شده‌اید. اعمال تغییرات در سامانه فقط توسط <strong>ادمین سیستم</strong> مجاز است.
+                  حساب کاربری <strong>{currentUser.fullName}</strong> — دسترسی‌های مجاز تعریف‌شده توسط مدیر سیستم:{' '}
+                  <strong>{grantedPermissionSummary}</strong>.
                 </span>
               </div>
               <button
@@ -760,7 +1013,7 @@ export default function App() {
                 onClick={() => setIsAuthModalOpen(true)}
                 className="text-amber-900 font-semibold underline hover:text-amber-950 self-start sm:self-auto whitespace-nowrap"
               >
-                ورود با حساب ادمین
+                ورود با حساب مدیر سیستم
               </button>
             </div>
           )}
@@ -769,12 +1022,11 @@ export default function App() {
             <EmployeesPage
               employees={appState.employees}
               currency={appState.settings.currency}
-              isAdmin={isAdmin}
+              canManageEmployees={canEmp}
               onAddEmployee={handleAddEmployee}
               onUpdateEmployee={handleUpdateEmployee}
-              onBatchUpdateSalaries={handleBatchUpdateSalaries}
-              onDeleteEmployee={handleDeleteEmployee}
               onToggleActive={handleToggleEmployeeActive}
+              onImportEmployeesBatch={handleImportEmployeesBatch}
             />
           )}
 
@@ -786,12 +1038,10 @@ export default function App() {
               manualPayments={appState.manualPayments ?? []}
               settings={appState.settings}
               periodKey={periodKey}
-              isAdmin={isAdmin}
-              requestedTab={payrollDataTab}
+              canEnterSalaries={canTimesheet}
               onUpsertTimesheet={handleUpsertTimesheet}
+              onBatchUpsertTimesheets={handleBatchUpsertTimesheets}
               onFillStandardMonth={handleFillStandardMonth}
-              onAddManualPayment={handleAddManualPayment}
-              onDeleteManualPayment={handleDeleteManualPayment}
             />
           )}
 
@@ -800,19 +1050,52 @@ export default function App() {
               employees={appState.employees}
               loans={appState.loans}
               settings={appState.settings}
+              appState={appState}
               periodKey={periodKey}
               isAdmin={isAdmin}
+              canManageLoans={canLoan}
+              canManageSettings={canSettings}
+              canManageBackup={canBackup}
               users={appState.users}
               currentUserId={appState.currentUserId}
               requestedTab={loansSettingsTab}
               onAddLoan={handleAddLoan}
+              onUpdateLoan={handleUpdateLoan}
+              onPayLoan={handlePayLoan}
               onUpdateLoanStatus={handleUpdateLoanStatus}
               onRecordLoanInstallment={handleRecordLoanInstallment}
               onDeleteLoan={handleDeleteLoan}
               onUpdateSettings={handleUpdateSettings}
+              onImportState={handleImportState}
               onAddUser={handleAddUser}
               onUpdateUser={handleUpdateUser}
               onDeleteUser={handleDeleteUser}
+            />
+          )}
+
+          {activePage === 'manual-salary-2' && (
+            <ManualSalary2Page
+              employees={appState.employees}
+              manualPayments={appState.manualPayments ?? []}
+              timesheets={appState.timesheets}
+              currency={appState.settings.currency}
+              periodKey={periodKey}
+              canEnterManualSalary2={canManual2}
+              onUpsertManualPayments={handleUpsertManualSalary2}
+            />
+          )}
+
+          {activePage === 'salary-tiers' && (
+            <SalaryTiersPage
+              employees={appState.employees}
+              manualPayments={appState.manualPayments ?? []}
+              periodKey={periodKey}
+              currency={appState.settings.currency}
+              canEnterSalaryTiers={canTiers}
+              canManageEmployees={canEmp}
+              onUpdateEmployee={handleUpdateEmployee}
+              onBatchUpdateSalaries={handleBatchUpdateSalaries}
+              onImportEmployees={handleImportEmployees}
             />
           )}
 
@@ -822,22 +1105,12 @@ export default function App() {
               settings={appState.settings}
               appState={appState}
               isAdmin={isAdmin}
-              onImportState={(imported) => {
-                if (!isAdmin) return;
-                setAppState({
-                  ...imported,
-                  users:
-                    Array.isArray(imported.users) && imported.users.length > 0
-                      ? imported.users
-                      : appState.users,
-                  currentUserId: appState.currentUserId,
-                  parametricTemplates: Array.isArray(imported.parametricTemplates)
-                    ? imported.parametricTemplates
-                    : appState.parametricTemplates ?? [],
-                });
-              }}
+              canViewReports={canReports}
+              canManageBackup={canBackup}
+              canManageSettings={canSettings}
+              onImportState={handleImportState}
               onSaveParametricTemplate={(template) => {
-                if (!isAdmin) return;
+                if (!isAdmin && !canSettings) return;
                 setAppState((prev) => ({
                   ...prev,
                   parametricTemplates: [
@@ -849,7 +1122,7 @@ export default function App() {
                 }));
               }}
               onDeleteParametricTemplate={(templateId) => {
-                if (!isAdmin) return;
+                if (!isAdmin && !canSettings) return;
                 setAppState((prev) => ({
                   ...prev,
                   parametricTemplates: (prev.parametricTemplates ?? []).filter(

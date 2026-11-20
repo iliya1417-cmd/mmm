@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowDown,
   ArrowUp,
@@ -27,7 +27,7 @@ import type {
   PayrollSettings,
 } from '../types/payroll';
 import {
-  EMPLOYMENT_TYPE_LABELS,
+  ALL_EMPLOYMENT_TYPES,
   IRANIAN_BANKS,
   calculatePayrollReport,
   formatMoney,
@@ -35,6 +35,7 @@ import {
   getEmploymentTypeLabel,
   toPersianDigits,
 } from '../utils/payroll';
+import { extractEmployeeDepartments } from '../utils/manualSalaryFilter';
 import {
   DEFAULT_PARAMETRIC_FILTERS,
   PARAMETRIC_CATEGORY_LABELS,
@@ -51,6 +52,8 @@ import {
   colIndexToExcelLetter,
   downloadParametricXlsx,
 } from '../utils/xlsxExport';
+import { CollapsibleCard } from './CollapsibleCard';
+import { ContractDepartmentChecklist } from './ContractDepartmentChecklist';
 
 interface ParametricReportBuilderProps {
   appState: AppState;
@@ -90,12 +93,33 @@ export const ParametricReportBuilder: React.FC<ParametricReportBuilderProps> = (
   >('all');
   const [fieldSearch, setFieldSearch] = useState('');
 
-  const [filters, setFilters] = useState<ParametricReportFilters>(
-    DEFAULT_PARAMETRIC_FILTERS
+  const departmentOptions = useMemo(
+    () => extractEmployeeDepartments(appState.employees),
+    [appState.employees]
   );
+
+  const [filters, setFilters] = useState<ParametricReportFilters>(() => ({
+    ...DEFAULT_PARAMETRIC_FILTERS,
+    selectedDepartments: extractEmployeeDepartments(appState.employees),
+    selectedContracts: [...ALL_EMPLOYMENT_TYPES],
+  }));
   const [sortBy, setSortBy] = useState<ParametricFieldId>('personnelCode');
   const [sortDirection, setSortDirection] =
     useState<ParametricSortDirection>('asc');
+
+  const knownDepartmentsRef = useRef<Set<string>>(new Set(departmentOptions));
+  useEffect(() => {
+    const brandNew = departmentOptions.filter(
+      (d) => !knownDepartmentsRef.current.has(d)
+    );
+    if (brandNew.length > 0) {
+      brandNew.forEach((d) => knownDepartmentsRef.current.add(d));
+      setFilters((f) => ({
+        ...f,
+        selectedDepartments: [...(f.selectedDepartments ?? []), ...brandNew],
+      }));
+    }
+  }, [departmentOptions]);
 
   // null means "all currently filtered rows"; string[] means hand-picked employee IDs
   const [selectedEmployeeIds, setSelectedEmployeeIds] = useState<
@@ -141,14 +165,6 @@ export const ParametricReportBuilder: React.FC<ParametricReportBuilderProps> = (
       filters.includeInactive,
     ]
   );
-
-  const departmentOptions = useMemo(() => {
-    const set = new Set<string>();
-    for (const emp of appState.employees) {
-      if (emp.department.trim()) set.add(emp.department.trim());
-    }
-    return Array.from(set);
-  }, [appState.employees]);
 
   const bankOptions = useMemo(() => {
     const set = new Set<string>(IRANIAN_BANKS);
@@ -800,7 +816,11 @@ export const ParametricReportBuilder: React.FC<ParametricReportBuilderProps> = (
             <button
               type="button"
               onClick={() => {
-                setFilters(DEFAULT_PARAMETRIC_FILTERS);
+                setFilters({
+                  ...DEFAULT_PARAMETRIC_FILTERS,
+                  selectedDepartments: [...departmentOptions],
+                  selectedContracts: [...ALL_EMPLOYMENT_TYPES],
+                });
                 setSelectedEmployeeIds(null);
                 setCustomRowOrderIds(null);
               }}
@@ -832,57 +852,23 @@ export const ParametricReportBuilder: React.FC<ParametricReportBuilderProps> = (
               />
             </div>
 
-            <div>
-              <label
-                htmlFor="parametric-filter-contract"
-                className="block text-[11px] text-slate-500 mb-1"
-              >
-                نوع قرارداد
-              </label>
-              <select
-                id="parametric-filter-contract"
-                value={filters.employmentType}
-                onChange={(e) =>
-                  setFilters((f) => ({
-                    ...f,
-                    employmentType: e.target.value as EmploymentType | 'all',
-                  }))
+            <div className="sm:col-span-2 lg:col-span-3">
+              <ContractDepartmentChecklist
+                idPrefix="parametric"
+                departments={departmentOptions}
+                selectedDepartments={
+                  filters.selectedDepartments ?? departmentOptions
                 }
-                className="w-full px-2 py-1.5 text-xs border border-slate-200 rounded bg-white"
-              >
-                <option value="all">همه قراردادها</option>
-                {(
-                  Object.keys(EMPLOYMENT_TYPE_LABELS) as EmploymentType[]
-                ).map((t) => (
-                  <option key={t} value={t}>
-                    {EMPLOYMENT_TYPE_LABELS[t]}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <div>
-              <label
-                htmlFor="parametric-filter-dept"
-                className="block text-[11px] text-slate-500 mb-1"
-              >
-                دپارتمان / واحد
-              </label>
-              <select
-                id="parametric-filter-dept"
-                value={filters.department}
-                onChange={(e) =>
-                  setFilters((f) => ({ ...f, department: e.target.value }))
+                selectedContracts={
+                  filters.selectedContracts ?? ALL_EMPLOYMENT_TYPES
                 }
-                className="w-full px-2 py-1.5 text-xs border border-slate-200 rounded bg-white"
-              >
-                <option value="all">همه دپارتمان‌ها</option>
-                {departmentOptions.map((d) => (
-                  <option key={d} value={d}>
-                    {d}
-                  </option>
-                ))}
-              </select>
+                onChangeDepartments={(next) =>
+                  setFilters((f) => ({ ...f, selectedDepartments: next }))
+                }
+                onChangeContracts={(next) =>
+                  setFilters((f) => ({ ...f, selectedContracts: next }))
+                }
+              />
             </div>
 
             <div>
@@ -1075,8 +1061,11 @@ export const ParametricReportBuilder: React.FC<ParametricReportBuilderProps> = (
                             </span>
                           </div>
                           <div className="text-[11px] text-slate-500 truncate">
-                            {getEmploymentTypeLabel(slip.employee.employmentType)} ·{' '}
-                            {slip.employee.bankName} · خالص:{' '}
+                            {getEmploymentTypeLabel(
+                              slip.employee.employmentType,
+                              slip.employee.customContractTitle
+                            )}{' '}
+                            · {slip.employee.bankName} · خالص:{' '}
                             <span className="font-mono-num tabular-nums font-medium text-teal-800">
                               {formatMoney(slip.netPayable)}
                             </span>
@@ -1116,33 +1105,13 @@ export const ParametricReportBuilder: React.FC<ParametricReportBuilderProps> = (
       </div>
 
       {/* Live Excel Preview Grid */}
-      <div className="bg-white border border-slate-200 rounded-lg overflow-hidden">
-        <div className="px-4 py-3 border-b border-slate-200 bg-slate-50/70 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
-          <div className="flex items-center gap-2">
-            <FileSpreadsheet
-              className="w-4 h-4 text-emerald-700"
-              aria-hidden="true"
-            />
-            <h3 className="text-sm font-semibold text-slate-900">
-              پیش‌نمایش زنده خروجی اکسل ({sheetName || 'ParametricReport'})
-            </h3>
-          </div>
-          <div className="text-xs text-slate-600 flex flex-wrap items-center gap-3">
-            <span>
-              جهت: <strong>{sheetDirection === 'ltr' ? 'چپ‌به‌راست (LTR)' : 'راست‌به‌راست (RTL)'}</strong>
-            </span>
-            <span>·</span>
-            <span>
-              تراز سلول‌ها: <strong>{ALIGNMENT_LABELS[cellAlignment]}</strong>
-            </span>
-            <span>·</span>
-            <span className="font-mono-num tabular-nums">
-              {toPersianDigits(tableData.rows.length)} ردیف ×{' '}
-              {toPersianDigits(tableData.columns.length)} ستون
-            </span>
-          </div>
-        </div>
-
+      <CollapsibleCard
+        title={`پیش‌نمایش زنده خروجی اکسل (${sheetName || 'ParametricReport'})`}
+        subtitle={`جهت: ${sheetDirection === 'ltr' ? 'چپ‌به‌راست (LTR)' : 'راست‌به‌راست (RTL)'} · تراز: ${ALIGNMENT_LABELS[cellAlignment]} · ${toPersianDigits(tableData.rows.length)} ردیف × ${toPersianDigits(tableData.columns.length)} ستون`}
+        defaultOpen={true}
+        resizable={true}
+        defaultSize="lg"
+      >
         {tableData.columns.length === 0 || tableData.rows.length === 0 ? (
           <div className="py-12 px-6 text-center text-xs text-slate-500">
             برای نمایش پیش‌نمایش و دانلود فایل اکسل، حداقل یک ستون و یک ردیف انتخاب کنید.
@@ -1264,7 +1233,7 @@ export const ParametricReportBuilder: React.FC<ParametricReportBuilderProps> = (
             </div>
           </div>
         )}
-      </div>
+      </CollapsibleCard>
     </div>
   );
 };

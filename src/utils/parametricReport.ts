@@ -6,6 +6,9 @@ import type {
   ParametricSortDirection,
 } from '../types/payroll';
 import {
+  SALARY_CALCULATION_MODE_SHORT_LABELS,
+  SALARY_TIER_LABELS,
+  getEffectiveSalaryMode,
   getEmploymentTypeLabel,
   normalizeManualSalaries,
   parseNumericInput,
@@ -93,7 +96,20 @@ export const PARAMETRIC_FIELDS: ReadonlyArray<ParametricFieldDefinition> = [
     category: 'identity',
     format: 'text',
     summable: false,
-    getValue: (s) => getEmploymentTypeLabel(s.employee.employmentType),
+    getValue: (s) =>
+      getEmploymentTypeLabel(
+        s.employee.employmentType,
+        s.employee.customContractTitle
+      ),
+  },
+  {
+    id: 'salaryCalculationMode',
+    label: 'روش محاسبه حقوق',
+    category: 'identity',
+    format: 'text',
+    summable: false,
+    getValue: (s) =>
+      SALARY_CALCULATION_MODE_SHORT_LABELS[getEffectiveSalaryMode(s.employee)],
   },
   {
     id: 'maritalStatus',
@@ -228,8 +244,24 @@ export const PARAMETRIC_FIELDS: ReadonlyArray<ParametricFieldDefinition> = [
     getValue: (s) => Math.round(s.employee.baseMonthlySalary),
   },
   {
+    id: 'seniorityAllowance',
+    label: 'پایه سنوات قرارداد',
+    category: 'attendance',
+    format: 'money',
+    summable: true,
+    getValue: (s) => Math.round(s.employee.seniorityAllowance ?? 0),
+  },
+  {
+    id: 'insuranceBaseCap',
+    label: 'سقف حقوق پایه بیمه فرد',
+    category: 'attendance',
+    format: 'money',
+    summable: false,
+    getValue: (s) => Math.round(s.employee.insuranceBaseCap ?? 0),
+  },
+  {
     id: 'manualSalary1',
-    label: 'حقوق اول',
+    label: SALARY_TIER_LABELS[0],
     category: 'attendance',
     format: 'money',
     summable: true,
@@ -241,7 +273,7 @@ export const PARAMETRIC_FIELDS: ReadonlyArray<ParametricFieldDefinition> = [
   },
   {
     id: 'manualSalary2',
-    label: 'حقوق دوم',
+    label: SALARY_TIER_LABELS[1],
     category: 'attendance',
     format: 'money',
     summable: true,
@@ -253,7 +285,7 @@ export const PARAMETRIC_FIELDS: ReadonlyArray<ParametricFieldDefinition> = [
   },
   {
     id: 'manualSalary3',
-    label: 'حقوق سوم',
+    label: SALARY_TIER_LABELS[2],
     category: 'attendance',
     format: 'money',
     summable: true,
@@ -265,7 +297,7 @@ export const PARAMETRIC_FIELDS: ReadonlyArray<ParametricFieldDefinition> = [
   },
   {
     id: 'manualSalary4',
-    label: 'حقوق چهارم',
+    label: SALARY_TIER_LABELS[3],
     category: 'attendance',
     format: 'money',
     summable: true,
@@ -277,7 +309,7 @@ export const PARAMETRIC_FIELDS: ReadonlyArray<ParametricFieldDefinition> = [
   },
   {
     id: 'manualSalary5',
-    label: 'حقوق پنجم',
+    label: SALARY_TIER_LABELS[4],
     category: 'attendance',
     format: 'money',
     summable: true,
@@ -286,6 +318,42 @@ export const PARAMETRIC_FIELDS: ReadonlyArray<ParametricFieldDefinition> = [
         s.employee.manualSalaries,
         s.employee.baseMonthlySalary
       )[4],
+  },
+  {
+    id: 'manualSalary6',
+    label: SALARY_TIER_LABELS[5],
+    category: 'attendance',
+    format: 'money',
+    summable: true,
+    getValue: (s) =>
+      normalizeManualSalaries(
+        s.employee.manualSalaries,
+        s.employee.baseMonthlySalary
+      )[5],
+  },
+  {
+    id: 'manualSalary7',
+    label: SALARY_TIER_LABELS[6],
+    category: 'attendance',
+    format: 'money',
+    summable: true,
+    getValue: (s) =>
+      normalizeManualSalaries(
+        s.employee.manualSalaries,
+        s.employee.baseMonthlySalary
+      )[6],
+  },
+  {
+    id: 'manualSalary8',
+    label: SALARY_TIER_LABELS[7],
+    category: 'attendance',
+    format: 'money',
+    summable: true,
+    getValue: (s) =>
+      normalizeManualSalaries(
+        s.employee.manualSalaries,
+        s.employee.baseMonthlySalary
+      )[7],
   },
 
   // Earnings
@@ -296,6 +364,14 @@ export const PARAMETRIC_FIELDS: ReadonlyArray<ParametricFieldDefinition> = [
     format: 'money',
     summable: true,
     getValue: (s) => Math.round(s.baseSalaryEarned),
+  },
+  {
+    id: 'seniorityEarned',
+    label: 'سنوات کارکرد',
+    category: 'earnings',
+    format: 'money',
+    summable: true,
+    getValue: (s) => Math.round(s.seniorityEarned),
   },
   {
     id: 'housingEarned',
@@ -352,6 +428,14 @@ export const PARAMETRIC_FIELDS: ReadonlyArray<ParametricFieldDefinition> = [
     format: 'money',
     summable: true,
     getValue: (s) => Math.round(s.holidayPay),
+  },
+  {
+    id: 'dayShiftPay',
+    label: 'مبلغ نوبت‌کاری روز',
+    category: 'earnings',
+    format: 'money',
+    summable: true,
+    getValue: (s) => Math.round(s.dayShiftPay),
   },
   {
     id: 'nightShiftPay',
@@ -606,10 +690,29 @@ export function filterParametricPayslips(
   return payslips.filter((slip) => {
     const emp = slip.employee;
     if (!filters.includeInactive && !emp.isActive) return false;
-    if (filters.department !== 'all' && emp.department !== filters.department) {
+    if (filters.selectedDepartments !== undefined) {
+      const deptName = emp.department.trim() || 'نامشخص';
+      if (
+        filters.selectedDepartments.length === 0 ||
+        !filters.selectedDepartments.includes(deptName)
+      ) {
+        return false;
+      }
+    } else if (
+      filters.department !== 'all' &&
+      emp.department !== filters.department
+    ) {
       return false;
     }
-    if (
+
+    if (filters.selectedContracts !== undefined) {
+      if (
+        filters.selectedContracts.length === 0 ||
+        !filters.selectedContracts.includes(emp.employmentType)
+      ) {
+        return false;
+      }
+    } else if (
       filters.employmentType !== 'all' &&
       emp.employmentType !== filters.employmentType
     ) {

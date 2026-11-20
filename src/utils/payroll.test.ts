@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  DEFAULT_ADMIN_PERMISSIONS,
+  DEFAULT_VIEWER_PERMISSIONS,
   EMPLOYMENT_TYPE_LABELS,
   IRANIAN_BANKS,
   MANUAL_SALARY_MODE_LABELS,
@@ -13,9 +15,21 @@ import {
   calculatePayrollReport,
   calculateProgressiveTax,
   calculateSoroushWorkDerivation,
+  canEnterManualSalary,
+  canEnterManualSalary2,
+  canEnterSalaries,
+  canEnterSalaryTiers,
+  canEnterTimesheets,
+  canManageBackup,
+  canManageEmployees,
+  canManageLoans,
+  canManageSettings,
+  canViewReports,
   detectBankFromSheba,
   formatMoney,
   generatePayrollCsv,
+  getEffectiveUserPermissions,
+  getEmploymentTypeLabel,
   getPeriodDays,
   isAdminUser,
   normalizeManualSalaries,
@@ -28,6 +42,7 @@ import {
   validateManualSalaryPaymentInput,
   validateSystemUserInput,
 } from './payroll';
+import { exportAppStateToJson, parseAppStateFromJson } from './storage';
 import {
   DEFAULT_PAYROLL_SETTINGS,
   INITIAL_SEED_STATE,
@@ -189,7 +204,12 @@ test('calculatePayrollReport aggregates seed employees and exports UTF-8 BOM CSV
     '1405-08'
   );
 
-  assert.equal(report.totals.employeeCount, 5);
+  assert.equal(report.totals.employeeCount, INITIAL_SEED_STATE.employees.length);
+  assert.equal(report.totals.employeeCount, 3);
+  const seedDepartments = new Set(INITIAL_SEED_STATE.employees.map((e) => e.department));
+  assert.equal(seedDepartments.size, 3);
+  const seedContractTypes = new Set(INITIAL_SEED_STATE.employees.map((e) => e.employmentType));
+  assert.equal(seedContractTypes.size, 3);
   assert.ok(report.totals.grossTotal > 0);
   assert.ok(report.totals.netPayableTotal < report.totals.grossTotal);
   assert.equal(report.totals.loanDeductionTotal, 2_500_000 + 1_500_000);
@@ -355,10 +375,15 @@ test('applyManualSalaryUpdates updates employee base salaries from Persian/Engli
   assert.equal(updated[2].baseMonthlySalary, INITIAL_SEED_STATE.employees[2].baseMonthlySalary);
 });
 
-test('5-tier manual salaries normalize, sum, and update baseMonthlySalary accurately', () => {
-  assert.equal(SALARY_TIER_LABELS.length, 5);
+test('8-tier manual salaries normalize, sum, and update baseMonthlySalary accurately', () => {
+  assert.equal(SALARY_TIER_LABELS.length, 8);
+  assert.equal(SALARY_TIER_LABELS[0], 'تولید سیما');
+  assert.equal(SALARY_TIER_LABELS[7], 'فضای مجازی');
   assert.deepEqual(normalizeManualSalaries(undefined, 18_000_000), [
     18_000_000,
+    0,
+    0,
+    0,
     0,
     0,
     0,
@@ -370,24 +395,41 @@ test('5-tier manual salaries normalize, sum, and update baseMonthlySalary accura
     0,
     0,
     0,
+    0,
+    0,
+    0,
   ]);
   assert.equal(
-    sumManualSalaries([10_000_000, 5_000_000, 3_000_000, 2_000_000, 1_000_000]),
-    21_000_000
+    sumManualSalaries([
+      10_000_000, 5_000_000, 3_000_000, 2_000_000, 1_000_000, 500_000, 400_000, 100_000,
+    ]),
+    22_000_000
   );
 
   const updated = applyMultiTierManualSalaryUpdates(INITIAL_SEED_STATE.employees, {
-    'emp-1': ['10,000,000', '۵,۰۰۰,۰۰۰', '3000000', '2000000', 1_000_000],
-    'emp-2': ['0', '0', '0', '0', '0'], // zero total ignored
+    'emp-1': [
+      '10,000,000',
+      '۵,۰۰۰,۰۰۰',
+      '3000000',
+      '2000000',
+      1_000_000,
+      '500000',
+      '400000',
+      100_000,
+    ],
+    'emp-2': ['0', '0', '0', '0', '0', '0', '0', '0'], // zero total ignored
   });
 
-  assert.equal(updated[0].baseMonthlySalary, 21_000_000);
+  assert.equal(updated[0].baseMonthlySalary, 22_000_000);
   assert.deepEqual(updated[0].manualSalaries, [
     10_000_000,
     5_000_000,
     3_000_000,
     2_000_000,
     1_000_000,
+    500_000,
+    400_000,
+    100_000,
   ]);
   assert.equal(
     updated[1].baseMonthlySalary,
@@ -401,7 +443,7 @@ test('5-tier manual salaries normalize, sum, and update baseMonthlySalary accura
     DEFAULT_PAYROLL_SETTINGS,
     '1405-08'
   );
-  assert.equal(slip.baseSalaryEarned, 21_000_000);
+  assert.equal(slip.baseSalaryEarned, 22_000_000);
 });
 
 test('manual salary payments support validation, additional mode, and override mode', () => {
@@ -417,7 +459,7 @@ test('manual salary payments support validation, additional mode, and override m
   assert.ok(invalid.amount);
   assert.ok(invalid.paymentDate);
 
-  const baseEmp = INITIAL_SEED_STATE.employees[1]; // مریم کاظمی
+  const baseEmp = INITIAL_SEED_STATE.employees[1]; // محمدمهدی کریمی
   const ts = INITIAL_SEED_STATE.timesheets[1];
   const baseline = calculateEmployeePayslip(
     baseEmp,
@@ -560,7 +602,7 @@ test('sherkati-soroush divides enteredSalary by baseMonthlySalary to derive dail
 });
 
 test('article-28 pays housing, food, marital, child, and fixed extra allowances', () => {
-  const art28Emp = INITIAL_SEED_STATE.employees[1]; // مریم کاظمی (article-28, married, 2 children)
+  const art28Emp = INITIAL_SEED_STATE.employees[1]; // محمدمهدی کریمی (article-28, married, 2 children)
   const ts = {
     ...INITIAL_SEED_STATE.timesheets[1],
     workingDays: 30,
@@ -579,3 +621,216 @@ test('article-28 pays housing, food, marital, child, and fixed extra allowances'
   assert.equal(slip.childEarned, 716_618 * 2);
   assert.equal(slip.specialFixedAllowanceEarned, 500_000);
 });
+
+test('seniorityAllowance, insuranceBaseCap, dayShiftPay, allowanceFlags, and custom contract work together', () => {
+  assert.equal(getEmploymentTypeLabel('custom', 'قرارداد پروژه‌ای'), 'قرارداد پروژه‌ای');
+
+  const emp: Employee = {
+    id: 'emp-custom',
+    personnelCode: '5001',
+    fullName: 'مهندس نمونه',
+    nationalId: '1122334455',
+    department: 'فنی',
+    jobTitle: 'کارشناس',
+    workLocation: 'سایت ۲',
+    mobileNumber: '09120000000',
+    workPhone: '02100000000',
+    employmentType: 'custom',
+    customContractTitle: 'پیمانکار ویژه',
+    salaryCalculationMode: 'daily-divided',
+    allowanceFlags: {
+      housing: true,
+      food: false,
+      marital: true,
+      child: false,
+      otherFixed: false,
+    },
+    baseMonthlySalary: 20_000_000,
+    seniorityAllowance: 2_000_000,
+    insuranceBaseCap: 15_000_000,
+    maritalStatus: 'married',
+    childrenCount: 2,
+    bankName: 'بانک ملت',
+    bankAccount: '',
+    hireDate: '1405/01/01',
+    isActive: true,
+  };
+
+  const ts: MonthlyTimesheet = {
+    id: 'emp-custom__1405-08',
+    employeeId: 'emp-custom',
+    periodKey: '1405-08',
+    workingDays: 30,
+    overtimeHours: 10,
+    holidayHours: 0,
+    dayShiftHours: 20,
+    nightShiftHours: 0,
+    absentDays: 0,
+    missionAllowance: 0,
+    bonus: 0,
+    otherAllowances: 0,
+    advancePayment: 0,
+    otherDeductions: 0,
+    note: '',
+  };
+
+  const settings = {
+    ...DEFAULT_PAYROLL_SETTINGS,
+    dayShiftMultiplier: 0.15,
+    insuranceSalaryCeiling: 0,
+  };
+
+  const slip = calculateEmployeePayslip(emp, ts, [], settings, '1405-08');
+  // Hourly base includes seniority: (20M + 2M) / 220 = 100,000
+  assert.equal(slip.dailyWage, Math.round(22_000_000 / 30));
+  assert.equal(slip.seniorityEarned, 2_000_000);
+  assert.equal(slip.overtimePay, 1_400_000);
+  assert.equal(slip.dayShiftPay, 300_000); // 20h * 100,000 * 0.15
+  assert.equal(slip.housingEarned, settings.housingAllowance);
+  assert.equal(slip.foodEarned, 0); // disabled by allowanceFlags
+  assert.equal(slip.maritalEarned, settings.maritalAllowance);
+  assert.equal(slip.childEarned, 0); // disabled by allowanceFlags
+  // Employee insurance base capped at 15,000,000
+  assert.equal(slip.insurableSalary, 15_000_000);
+  assert.equal(slip.employeeInsurance, Math.round(15_000_000 * 0.07));
+});
+
+test('salaryCalculationMode fixed vs manual and canEnterSalaries permission checks', () => {
+  const baseEmp: Employee = {
+    ...INITIAL_SEED_STATE.employees[0],
+    salaryCalculationMode: 'fixed',
+    baseMonthlySalary: 30_000_000,
+    seniorityAllowance: 0,
+  };
+  const halfMonthTs: MonthlyTimesheet = {
+    ...INITIAL_SEED_STATE.timesheets[0],
+    workingDays: 15,
+    absentDays: 5,
+    enteredSalary: 10_000_000,
+  };
+  const fixedSlip = calculateEmployeePayslip(
+    baseEmp,
+    halfMonthTs,
+    [],
+    DEFAULT_PAYROLL_SETTINGS,
+    '1405-08'
+  );
+  // Fixed mode ignores workingDays/absentDays for base salary
+  assert.equal(fixedSlip.effectiveDays, 30);
+  assert.equal(fixedSlip.baseSalaryEarned, 30_000_000);
+
+  const manualEmp: Employee = {
+    ...baseEmp,
+    salaryCalculationMode: 'manual',
+  };
+  const manualSlip = calculateEmployeePayslip(
+    manualEmp,
+    halfMonthTs,
+    [],
+    DEFAULT_PAYROLL_SETTINGS,
+    '1405-08'
+  );
+  assert.equal(manualSlip.isManualOverride, true);
+  assert.equal(manualSlip.netPayable, 10_000_000);
+  assert.equal(manualSlip.employeeInsurance, 0);
+  assert.equal(manualSlip.incomeTax, 0);
+
+  const adminUser = INITIAL_USERS[0];
+  const viewerUser = INITIAL_USERS[1];
+  assert.equal(isAdminUser(adminUser), true);
+  assert.equal(canEnterSalaries(adminUser), true);
+  assert.equal(isAdminUser(viewerUser), false);
+  assert.equal(canEnterSalaries(viewerUser), true);
+  assert.equal(canEnterSalaries({ ...viewerUser, isActive: false }), false);
+  assert.equal(canEnterSalaries(null), false);
+});
+
+test('granular per-user permissions give admin full access and let admin customize viewer permissions', () => {
+  const adminPerms = getEffectiveUserPermissions(INITIAL_USERS[0]);
+  assert.deepEqual(adminPerms, DEFAULT_ADMIN_PERMISSIONS);
+  assert.equal(canManageEmployees(INITIAL_USERS[0]), true);
+  assert.equal(canManageLoans(INITIAL_USERS[0]), true);
+  assert.equal(canManageSettings(INITIAL_USERS[0]), true);
+  assert.equal(canManageBackup(INITIAL_USERS[0]), true);
+  assert.equal(canEnterSalaryTiers(INITIAL_USERS[0]), true);
+  assert.equal(canViewReports(INITIAL_USERS[0]), true);
+
+  // Default viewer keeps backward-compatible salary entry & report access
+  const defaultViewerPerms = getEffectiveUserPermissions(INITIAL_USERS[1]);
+  assert.deepEqual(defaultViewerPerms, DEFAULT_VIEWER_PERMISSIONS);
+  assert.equal(canManageEmployees(INITIAL_USERS[1]), false);
+  assert.equal(canManageBackup(INITIAL_USERS[1]), false);
+  assert.equal(canEnterTimesheets(INITIAL_USERS[1]), true);
+  assert.equal(canEnterManualSalary(INITIAL_USERS[1]), true);
+  assert.equal(canEnterManualSalary2(INITIAL_USERS[1]), true);
+  assert.equal(canEnterSalaryTiers(INITIAL_USERS[1]), true);
+  assert.equal(canViewReports(INITIAL_USERS[1]), true);
+
+  // Admin-customized viewer user: allowed to manage loans & backup, denied reports & manual salary
+  const customViewer = {
+    ...INITIAL_USERS[1],
+    permissions: {
+      ...DEFAULT_VIEWER_PERMISSIONS,
+      manageLoans: true,
+      manageBackup: true,
+      viewReports: false,
+      enterManualSalary: false,
+      enterManualSalary2: false,
+    },
+  };
+  assert.equal(canManageLoans(customViewer), true);
+  assert.equal(canManageBackup(customViewer), true);
+  assert.equal(canViewReports(customViewer), false);
+  assert.equal(canEnterManualSalary(customViewer), false);
+  assert.equal(canEnterManualSalary2(customViewer), false);
+  assert.equal(canEnterSalaryTiers(customViewer), true);
+});
+
+test('exportAppStateToJson and parseAppStateFromJson round-trip valid backup and reject invalid JSON', () => {
+  const json = exportAppStateToJson(INITIAL_SEED_STATE);
+  const parsed = parseAppStateFromJson(json);
+  assert.ok(parsed.state);
+  assert.equal(parsed.error, undefined);
+  assert.equal(parsed.state!.employees.length, INITIAL_SEED_STATE.employees.length);
+
+  const badJson = parseAppStateFromJson('{not-valid');
+  assert.equal(badJson.state, null);
+  assert.ok(badJson.error);
+
+  const incompleteJson = parseAppStateFromJson('{"employees":[]}');
+  assert.equal(incompleteJson.state, null);
+  assert.ok(incompleteJson.error);
+});
+
+test('applyLoanPayment deducts partial/full custom payments and settles loan at zero balance', async () => {
+  const { applyLoanPayment } = await import('./payroll');
+  const loan = INITIAL_SEED_STATE.loans[0]; // remainingBalance: 20_000_000
+
+  const partial = applyLoanPayment(loan, 5_000_000);
+  assert.equal(partial.appliedAmount, 5_000_000);
+  assert.equal(partial.updatedLoan.remainingBalance, 15_000_000);
+  assert.equal(partial.updatedLoan.status, 'active');
+
+  // Overpayment clamps cleanly to remainingBalance and marks settled
+  const payoff = applyLoanPayment(partial.updatedLoan, 25_000_000);
+  assert.equal(payoff.appliedAmount, 15_000_000);
+  assert.equal(payoff.updatedLoan.remainingBalance, 0);
+  assert.equal(payoff.updatedLoan.status, 'settled');
+});
+
+test('applyMultiTierManualSalaryUpdates sums 8 tiers and customTierDrafts into baseMonthlySalary', async () => {
+  const { applyMultiTierManualSalaryUpdates } = await import('./payroll');
+  const emp = INITIAL_SEED_STATE.employees[0];
+  const updatedList = applyMultiTierManualSalaryUpdates(
+    [emp],
+    { [emp.id]: [12_000_000, 0, 0, 0, 0, 0, 3_000_000, 0] },
+    { [emp.id]: { 'معاونت مالی': 8_000_000 } }
+  );
+  assert.deepEqual(updatedList[0].manualSalaries, [
+    12_000_000, 0, 0, 0, 0, 0, 3_000_000, 0,
+  ]);
+  assert.deepEqual(updatedList[0].customTierAmounts, { 'معاونت مالی': 8_000_000 });
+  assert.equal(updatedList[0].baseMonthlySalary, 23_000_000);
+});
+
+

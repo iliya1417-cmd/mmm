@@ -1,12 +1,17 @@
 import React, { useEffect, useState } from 'react';
 import {
+  Banknote,
   CheckCircle2,
+  Download,
+  Edit3,
   PauseCircle,
   PlayCircle,
   Plus,
   RotateCcw,
   Shield,
+  SlidersHorizontal,
   Trash2,
+  Upload,
   UserCheck,
   UserPlus,
   UserX,
@@ -14,6 +19,7 @@ import {
   X,
 } from 'lucide-react';
 import type {
+  AppState,
   CurrencyUnit,
   Employee,
   Loan,
@@ -22,19 +28,28 @@ import type {
   SpecialContractAllowances,
   SystemUser,
   TaxBracket,
+  UserPermissions,
   UserRole,
 } from '../types/payroll';
 import {
+  DEFAULT_ADMIN_PERMISSIONS,
+  DEFAULT_VIEWER_PERMISSIONS,
+  EMPTY_USER_PERMISSIONS,
+  USER_PERMISSION_ITEMS,
   USER_ROLE_LABELS,
   formatMoney,
   formatPeriodLabel,
+  getEffectiveUserPermissions,
+  parseNumericInput,
   toEnglishDigits,
   toPersianDigits,
   validateLoanInput,
   validateSystemUserInput,
   type ValidationErrors,
 } from '../utils/payroll';
+import { exportAppStateToJson, parseAppStateFromJson } from '../utils/storage';
 import { DEFAULT_PAYROLL_SETTINGS } from '../data/seedData';
+import { CollapsibleCard } from './CollapsibleCard';
 
 export type LoansSettingsTab = 'loans' | 'settings' | 'users';
 
@@ -42,16 +57,23 @@ interface LoansSettingsPageProps {
   employees: Employee[];
   loans: Loan[];
   settings: PayrollSettings;
+  appState: AppState;
   periodKey: string;
   isAdmin: boolean;
+  canManageLoans: boolean;
+  canManageSettings: boolean;
+  canManageBackup: boolean;
   users: SystemUser[];
   currentUserId: string | null;
   requestedTab?: LoansSettingsTab | null;
   onAddLoan: (loan: Omit<Loan, 'id' | 'createdAt'>) => void;
+  onUpdateLoan?: (loan: Loan) => void;
+  onPayLoan?: (loanId: string, amount: number) => void;
   onUpdateLoanStatus: (loanId: string, status: LoanStatus) => void;
   onRecordLoanInstallment: (loanId: string) => void;
   onDeleteLoan: (loanId: string) => void;
   onUpdateSettings: (settings: PayrollSettings) => void;
+  onImportState: (state: AppState) => void;
   onAddUser: (user: Omit<SystemUser, 'id' | 'createdAt'>) => void;
   onUpdateUser: (user: SystemUser) => void;
   onDeleteUser: (userId: string) => void;
@@ -70,22 +92,33 @@ export const LoansSettingsPage: React.FC<LoansSettingsPageProps> = ({
   employees,
   loans,
   settings,
+  appState,
   periodKey,
   isAdmin,
+  canManageLoans,
+  canManageSettings,
+  canManageBackup,
   users,
   currentUserId,
   requestedTab,
   onAddLoan,
+  onUpdateLoan,
+  onPayLoan,
   onUpdateLoanStatus,
   onRecordLoanInstallment,
   onDeleteLoan,
   onUpdateSettings,
+  onImportState,
   onAddUser,
   onUpdateUser,
   onDeleteUser,
 }) => {
   const [activeTab, setActiveTab] = useState<LoansSettingsTab>(requestedTab ?? 'loans');
   const [isLoanModalOpen, setIsLoanModalOpen] = useState(false);
+  const [editingLoan, setEditingLoan] = useState<Loan | null>(null);
+  const [payingLoan, setPayingLoan] = useState<Loan | null>(null);
+  const [payLoanAmountInput, setPayLoanAmountInput] = useState('');
+  const [payLoanError, setPayLoanError] = useState<string | null>(null);
 
   useEffect(() => {
     if (requestedTab) {
@@ -101,14 +134,20 @@ export const LoansSettingsPage: React.FC<LoansSettingsPageProps> = ({
     password: string;
     role: UserRole;
     isActive: boolean;
+    permissions: UserPermissions;
   }>({
     fullName: '',
     username: '',
     password: '',
     role: 'viewer',
     isActive: true,
+    permissions: { ...DEFAULT_VIEWER_PERMISSIONS },
   });
   const [userErrors, setUserErrors] = useState<ValidationErrors>({});
+  const [editingPermissionsUser, setEditingPermissionsUser] =
+    useState<SystemUser | null>(null);
+  const [editingPermissionsDraft, setEditingPermissionsDraft] =
+    useState<UserPermissions>({ ...DEFAULT_VIEWER_PERMISSIONS });
 
   const [loanForm, setLoanForm] = useState<{
     employeeId: string;
@@ -117,6 +156,7 @@ export const LoansSettingsPage: React.FC<LoansSettingsPageProps> = ({
     monthlyInstallment: number;
     remainingBalance: number;
     startPeriod: string;
+    status: LoanStatus;
   }>({
     employeeId: employees[0]?.id ?? '',
     title: '',
@@ -124,9 +164,49 @@ export const LoansSettingsPage: React.FC<LoansSettingsPageProps> = ({
     monthlyInstallment: 2_000_000,
     remainingBalance: 20_000_000,
     startPeriod: periodKey,
+    status: 'active',
   });
   const [loanErrors, setLoanErrors] = useState<ValidationErrors>({});
   const [settingsSavedNotice, setSettingsSavedNotice] = useState(false);
+  const [backupError, setBackupError] = useState<string | null>(null);
+  const [backupSuccess, setBackupSuccess] = useState(false);
+  const backupFileInputRef = React.useRef<HTMLInputElement>(null);
+
+  const handleDownloadJsonBackup = () => {
+    if (!canManageBackup) return;
+    const json = exportAppStateToJson(appState);
+    const blob = new Blob([json], { type: 'application/json;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `lak-payroll-backup-${periodKey}.json`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
+  const handleBackupFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!canManageBackup) return;
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setBackupError(null);
+    setBackupSuccess(false);
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = parseAppStateFromJson(String(reader.result));
+      if (!result.state) {
+        setBackupError(result.error ?? 'ساختار فایل پشتیبان معتبر نیست.');
+        return;
+      }
+      onImportState(result.state);
+      setBackupSuccess(true);
+      window.setTimeout(() => setBackupSuccess(false), 2600);
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  };
 
   const employeeMap = new Map(employees.map((e) => [e.id, e]));
 
@@ -139,7 +219,8 @@ export const LoansSettingsPage: React.FC<LoansSettingsPageProps> = ({
     .reduce((sum, l) => sum + Math.min(l.monthlyInstallment, l.remainingBalance), 0);
 
   const openLoanModal = () => {
-    if (!isAdmin) return;
+    if (!canManageLoans) return;
+    setEditingLoan(null);
     setLoanForm({
       employeeId: employees[0]?.id ?? '',
       title: '',
@@ -147,14 +228,63 @@ export const LoansSettingsPage: React.FC<LoansSettingsPageProps> = ({
       monthlyInstallment: 2_000_000,
       remainingBalance: 20_000_000,
       startPeriod: periodKey,
+      status: 'active',
     });
     setLoanErrors({});
     setIsLoanModalOpen(true);
   };
 
+  const openEditLoanModal = (loan: Loan) => {
+    if (!canManageLoans) return;
+    setEditingLoan(loan);
+    setLoanForm({
+      employeeId: loan.employeeId,
+      title: loan.title,
+      totalAmount: loan.totalAmount,
+      monthlyInstallment: loan.monthlyInstallment,
+      remainingBalance: loan.remainingBalance,
+      startPeriod: loan.startPeriod,
+      status: loan.status,
+    });
+    setLoanErrors({});
+    setIsLoanModalOpen(true);
+  };
+
+  const openPayLoanModal = (loan: Loan) => {
+    if (!canManageLoans || loan.status === 'settled' || loan.remainingBalance <= 0) return;
+    setPayingLoan(loan);
+    setPayLoanAmountInput(
+      String(Math.min(loan.monthlyInstallment, loan.remainingBalance))
+    );
+    setPayLoanError(null);
+  };
+
+  const handlePayLoanSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!canManageLoans || !payingLoan) return;
+    const amount = parseNumericInput(payLoanAmountInput);
+    if (amount <= 0) {
+      setPayLoanError('مبلغ پرداخت وام باید بزرگتر از صفر باشد.');
+      return;
+    }
+    if (onPayLoan) {
+      onPayLoan(payingLoan.id, amount);
+    } else if (onUpdateLoan) {
+      const nextBalance = Math.max(0, payingLoan.remainingBalance - amount);
+      onUpdateLoan({
+        ...payingLoan,
+        remainingBalance: nextBalance,
+        status: nextBalance === 0 ? 'settled' : payingLoan.status,
+      });
+    } else {
+      onRecordLoanInstallment(payingLoan.id);
+    }
+    setPayingLoan(null);
+  };
+
   const handleLoanSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!isAdmin) return;
+    if (!canManageLoans) return;
     const errs = validateLoanInput({
       employeeId: loanForm.employeeId,
       title: loanForm.title,
@@ -167,16 +297,39 @@ export const LoansSettingsPage: React.FC<LoansSettingsPageProps> = ({
       return;
     }
 
-    onAddLoan({
-      employeeId: loanForm.employeeId,
-      title: loanForm.title.trim(),
-      totalAmount: loanForm.totalAmount,
-      monthlyInstallment: loanForm.monthlyInstallment,
-      remainingBalance: loanForm.remainingBalance,
-      startPeriod: loanForm.startPeriod,
-      status: loanForm.remainingBalance === 0 ? 'settled' : 'active',
-    });
+    const nextStatus: LoanStatus =
+      loanForm.remainingBalance === 0
+        ? 'settled'
+        : editingLoan
+          ? loanForm.status === 'settled'
+            ? 'active'
+            : loanForm.status
+          : 'active';
+
+    if (editingLoan && onUpdateLoan) {
+      onUpdateLoan({
+        ...editingLoan,
+        employeeId: loanForm.employeeId,
+        title: loanForm.title.trim(),
+        totalAmount: loanForm.totalAmount,
+        monthlyInstallment: loanForm.monthlyInstallment,
+        remainingBalance: loanForm.remainingBalance,
+        startPeriod: loanForm.startPeriod,
+        status: nextStatus,
+      });
+    } else {
+      onAddLoan({
+        employeeId: loanForm.employeeId,
+        title: loanForm.title.trim(),
+        totalAmount: loanForm.totalAmount,
+        monthlyInstallment: loanForm.monthlyInstallment,
+        remainingBalance: loanForm.remainingBalance,
+        startPeriod: loanForm.startPeriod,
+        status: nextStatus,
+      });
+    }
     setIsLoanModalOpen(false);
+    setEditingLoan(null);
   };
 
   const openUserModal = () => {
@@ -187,6 +340,7 @@ export const LoansSettingsPage: React.FC<LoansSettingsPageProps> = ({
       password: '',
       role: 'viewer',
       isActive: true,
+      permissions: { ...DEFAULT_VIEWER_PERMISSIONS },
     });
     setUserErrors({});
     setIsUserModalOpen(true);
@@ -201,6 +355,10 @@ export const LoansSettingsPage: React.FC<LoansSettingsPageProps> = ({
       password: userForm.password,
       role: userForm.role,
       isActive: userForm.isActive,
+      permissions:
+        userForm.role === 'admin'
+          ? { ...DEFAULT_ADMIN_PERMISSIONS }
+          : { ...userForm.permissions },
     };
     const errs = validateSystemUserInput(cleaned, users);
     if (Object.keys(errs).length > 0) {
@@ -211,6 +369,22 @@ export const LoansSettingsPage: React.FC<LoansSettingsPageProps> = ({
     setIsUserModalOpen(false);
   };
 
+  const openPermissionsModal = (user: SystemUser) => {
+    if (!isAdmin || user.role === 'admin') return;
+    setEditingPermissionsUser(user);
+    setEditingPermissionsDraft(getEffectiveUserPermissions(user));
+  };
+
+  const handleSaveUserPermissions = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!isAdmin || !editingPermissionsUser) return;
+    onUpdateUser({
+      ...editingPermissionsUser,
+      permissions: { ...editingPermissionsDraft },
+    });
+    setEditingPermissionsUser(null);
+  };
+
   const activeAdminCount = users.filter(
     (u) => u.isActive && u.role === 'admin'
   ).length;
@@ -219,7 +393,7 @@ export const LoansSettingsPage: React.FC<LoansSettingsPageProps> = ({
     field: K,
     value: PayrollSettings[K]
   ) => {
-    if (!isAdmin) return;
+    if (!canManageSettings) return;
     onUpdateSettings({
       ...settings,
       [field]: value,
@@ -248,7 +422,7 @@ export const LoansSettingsPage: React.FC<LoansSettingsPageProps> = ({
     id: string,
     patch: Partial<TaxBracket>
   ) => {
-    if (!isAdmin) return;
+    if (!canManageSettings) return;
     const next = settings.taxBrackets.map((b) =>
       b.id === id ? { ...b, ...patch } : b
     );
@@ -256,7 +430,7 @@ export const LoansSettingsPage: React.FC<LoansSettingsPageProps> = ({
   };
 
   const addBracket = () => {
-    if (!isAdmin) return;
+    if (!canManageSettings) return;
     const sorted = [...settings.taxBrackets].sort(
       (a, b) => a.minMonthly - b.minMonthly
     );
@@ -277,7 +451,7 @@ export const LoansSettingsPage: React.FC<LoansSettingsPageProps> = ({
   };
 
   const removeBracket = (id: string) => {
-    if (!isAdmin || settings.taxBrackets.length <= 1) return;
+    if (!canManageSettings || settings.taxBrackets.length <= 1) return;
     updateSettingField(
       'taxBrackets',
       settings.taxBrackets.filter((b) => b.id !== id)
@@ -338,7 +512,7 @@ export const LoansSettingsPage: React.FC<LoansSettingsPageProps> = ({
           <button
             type="button"
             onClick={openLoanModal}
-            disabled={!isAdmin || employees.length === 0}
+            disabled={!canManageLoans || employees.length === 0}
             className="inline-flex items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-teal-700 hover:bg-teal-800 disabled:opacity-50 disabled:cursor-not-allowed rounded-md transition-colors whitespace-nowrap shrink-0"
           >
             <Plus className="w-4 h-4" aria-hidden="true" />
@@ -353,9 +527,9 @@ export const LoansSettingsPage: React.FC<LoansSettingsPageProps> = ({
             )}
             <button
               type="button"
-              disabled={!isAdmin}
+              disabled={!canManageSettings}
               onClick={() => {
-                if (!isAdmin) return;
+                if (!canManageSettings) return;
                 onUpdateSettings(DEFAULT_PAYROLL_SETTINGS);
                 setSettingsSavedNotice(true);
                 window.setTimeout(() => setSettingsSavedNotice(false), 1800);
@@ -415,7 +589,13 @@ export const LoansSettingsPage: React.FC<LoansSettingsPageProps> = ({
           </div>
 
           {/* Loans Table */}
-          <div className="bg-white border border-slate-200 rounded-lg overflow-hidden">
+          <CollapsibleCard
+            title="فهرست وام‌ها و اقساط کارمندان"
+            subtitle="قابل جمع‌شدن و تغییر اندازه کادر"
+            badge={`${toPersianDigits(loans.length)} پرونده`}
+            resizable
+            bodyClassName="p-0"
+          >
             {loans.length === 0 ? (
               <div className="py-12 px-6 text-center">
                 <p className="text-sm font-medium text-slate-700">
@@ -424,7 +604,7 @@ export const LoansSettingsPage: React.FC<LoansSettingsPageProps> = ({
                 <p className="mt-1 text-xs text-slate-500">
                   با ثبت وام، مبلغ قسط ماهانه به صورت خودکار از فیش حقوقی کارمند کسر می‌شود.
                 </p>
-                {isAdmin && (
+                {canManageLoans && (
                   <button
                     type="button"
                     onClick={openLoanModal}
@@ -439,18 +619,18 @@ export const LoansSettingsPage: React.FC<LoansSettingsPageProps> = ({
               <div className="overflow-x-auto">
                 <table className="w-full text-right border-collapse">
                   <thead>
-                    <tr className="border-b border-slate-200 bg-slate-50 text-xs font-medium text-slate-500">
-                      <th className="py-3 px-4 whitespace-nowrap">کارمند</th>
-                      <th className="py-3 px-4 whitespace-nowrap">عنوان وام</th>
-                      <th className="py-3 px-4 whitespace-nowrap">مبلغ کل ({settings.currency})</th>
-                      <th className="py-3 px-4 whitespace-nowrap">قسط ماهانه ({settings.currency})</th>
-                      <th className="py-3 px-4 whitespace-nowrap">مانده بدهی ({settings.currency})</th>
-                      <th className="py-3 px-4 whitespace-nowrap">شروع بازپرداخت</th>
-                      <th className="py-3 px-4 whitespace-nowrap">وضعیت</th>
-                      <th className="py-3 px-4 whitespace-nowrap text-left">عملیات</th>
+                    <tr className="border-b border-slate-200 bg-slate-50 text-[11px] font-medium text-slate-500">
+                      <th className="py-2.5 px-3 whitespace-nowrap">کارمند</th>
+                      <th className="py-2.5 px-2.5 whitespace-nowrap">عنوان وام</th>
+                      <th className="py-2.5 px-2.5 whitespace-nowrap">مبلغ کل ({settings.currency})</th>
+                      <th className="py-2.5 px-2.5 whitespace-nowrap">قسط ماهانه</th>
+                      <th className="py-2.5 px-2.5 whitespace-nowrap">مانده بدهی</th>
+                      <th className="py-2.5 px-2.5 whitespace-nowrap">شروع بازپرداخت</th>
+                      <th className="py-2.5 px-2.5 whitespace-nowrap">وضعیت</th>
+                      <th className="py-2.5 px-3 whitespace-nowrap text-left">عملیات</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-slate-200 text-sm">
+                  <tbody className="divide-y divide-slate-200 text-xs">
                     {loans.map((loan) => {
                       const emp = employeeMap.get(loan.employeeId);
                       const paidPercent =
@@ -465,42 +645,42 @@ export const LoansSettingsPage: React.FC<LoansSettingsPageProps> = ({
 
                       return (
                         <tr key={loan.id} className="hover:bg-slate-50/70">
-                          <td className="py-3 px-4 whitespace-nowrap">
+                          <td className="py-2.5 px-3 whitespace-nowrap">
                             <div className="font-medium text-slate-900">
                               {emp?.fullName ?? 'کارمند حذف‌شده'}
                             </div>
                             {emp && (
-                              <div className="text-xs text-slate-400 font-mono-num tabular-nums">
+                              <div className="text-[11px] text-slate-400 font-mono-num tabular-nums">
                                 کد {toPersianDigits(emp.personnelCode)}
                               </div>
                             )}
                           </td>
-                          <td className="py-3 px-4 text-slate-800 whitespace-nowrap">
+                          <td className="py-2.5 px-2.5 text-slate-800 whitespace-nowrap">
                             {loan.title}
                           </td>
-                          <td className="py-3 px-4 font-mono-num tabular-nums text-slate-700 whitespace-nowrap">
+                          <td className="py-2.5 px-2.5 font-mono-num tabular-nums text-slate-700 whitespace-nowrap">
                             {formatMoney(loan.totalAmount)}
                           </td>
-                          <td className="py-3 px-4 font-mono-num tabular-nums font-medium text-slate-900 whitespace-nowrap">
+                          <td className="py-2.5 px-2.5 font-mono-num tabular-nums font-medium text-slate-900 whitespace-nowrap">
                             {formatMoney(loan.monthlyInstallment)}
                           </td>
-                          <td className="py-3 px-4 whitespace-nowrap">
+                          <td className="py-2.5 px-2.5 whitespace-nowrap">
                             <div className="font-mono-num tabular-nums font-semibold text-slate-900">
                               {formatMoney(loan.remainingBalance)}
                             </div>
-                            <div className="w-28 h-1.5 bg-slate-100 rounded-full mt-1 overflow-hidden">
+                            <div className="w-24 h-1.5 bg-slate-100 rounded-full mt-1 overflow-hidden">
                               <div
                                 className="h-full bg-teal-600"
                                 style={{ width: `${Math.min(100, Math.max(0, paidPercent))}%` }}
                               />
                             </div>
                           </td>
-                          <td className="py-3 px-4 text-xs text-slate-600 whitespace-nowrap">
+                          <td className="py-2.5 px-2.5 text-[11px] text-slate-600 whitespace-nowrap">
                             {formatPeriodLabel(loan.startPeriod)}
                           </td>
-                          <td className="py-3 px-4 whitespace-nowrap">
+                          <td className="py-2.5 px-2.5 whitespace-nowrap">
                             <span
-                              className={`inline-flex items-center gap-1.5 text-xs font-medium ${statusMeta.className}`}
+                              className={`inline-flex items-center gap-1 text-[11px] font-medium ${statusMeta.className}`}
                             >
                               {loan.status === 'active' && (
                                 <CheckCircle2 className="w-3.5 h-3.5" aria-hidden="true" />
@@ -514,21 +694,30 @@ export const LoansSettingsPage: React.FC<LoansSettingsPageProps> = ({
                               <span>{statusMeta.label}</span>
                             </span>
                           </td>
-                          <td className="py-3 px-4 whitespace-nowrap text-left">
-                            <div className="inline-flex items-center gap-1.5">
+                          <td className="py-2.5 px-3 whitespace-nowrap text-left">
+                            <div className="inline-flex items-center gap-1">
                               {loan.status !== 'settled' && (
                                 <>
                                   <button
                                     type="button"
-                                    disabled={!isAdmin}
-                                    onClick={() => onRecordLoanInstallment(loan.id)}
-                                    className="px-2.5 py-1 text-xs font-medium text-teal-800 bg-teal-50 hover:bg-teal-100 border border-teal-200 disabled:opacity-40 disabled:cursor-not-allowed rounded transition-colors"
+                                    disabled={!canManageLoans}
+                                    onClick={() => openPayLoanModal(loan)}
+                                    className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-white bg-emerald-700 hover:bg-emerald-800 disabled:opacity-40 disabled:cursor-not-allowed rounded transition-colors"
                                   >
-                                    ثبت پرداخت ۱ قسط
+                                    <Banknote className="w-3 h-3" aria-hidden="true" />
+                                    <span>پرداخت وام</span>
                                   </button>
                                   <button
                                     type="button"
-                                    disabled={!isAdmin}
+                                    disabled={!canManageLoans}
+                                    onClick={() => onRecordLoanInstallment(loan.id)}
+                                    className="px-2 py-1 text-[11px] font-medium text-teal-800 bg-teal-50 hover:bg-teal-100 border border-teal-200 disabled:opacity-40 disabled:cursor-not-allowed rounded transition-colors"
+                                  >
+                                    ۱ قسط
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={!canManageLoans}
                                     onClick={() =>
                                       onUpdateLoanStatus(
                                         loan.id,
@@ -540,24 +729,34 @@ export const LoansSettingsPage: React.FC<LoansSettingsPageProps> = ({
                                         ? `توقف قسط ${loan.title}`
                                         : `ازسرگیری قسط ${loan.title}`
                                     }
-                                    className="p-1.5 text-slate-500 hover:text-amber-700 hover:bg-amber-50 disabled:opacity-40 disabled:cursor-not-allowed rounded transition-colors"
+                                    className="p-1 text-slate-500 hover:text-amber-700 hover:bg-amber-50 disabled:opacity-40 disabled:cursor-not-allowed rounded transition-colors"
                                   >
                                     {loan.status === 'active' ? (
-                                      <PauseCircle className="w-4 h-4" aria-hidden="true" />
+                                      <PauseCircle className="w-3.5 h-3.5" aria-hidden="true" />
                                     ) : (
-                                      <PlayCircle className="w-4 h-4" aria-hidden="true" />
+                                      <PlayCircle className="w-3.5 h-3.5" aria-hidden="true" />
                                     )}
                                   </button>
                                 </>
                               )}
                               <button
                                 type="button"
-                                disabled={!isAdmin}
+                                disabled={!canManageLoans}
+                                onClick={() => openEditLoanModal(loan)}
+                                aria-label={`ویرایش وام ${loan.title}`}
+                                className="inline-flex items-center gap-1 px-2 py-1 text-[11px] font-medium text-slate-700 hover:text-teal-800 bg-slate-100 hover:bg-teal-50 border border-slate-200 disabled:opacity-40 disabled:cursor-not-allowed rounded transition-colors"
+                              >
+                                <Edit3 className="w-3 h-3" aria-hidden="true" />
+                                <span>ویرایش</span>
+                              </button>
+                              <button
+                                type="button"
+                                disabled={!canManageLoans}
                                 onClick={() => onDeleteLoan(loan.id)}
                                 aria-label={`حذف وام ${loan.title}`}
-                                className="p-1.5 text-slate-500 hover:text-rose-700 hover:bg-rose-50 disabled:opacity-40 disabled:cursor-not-allowed rounded transition-colors"
+                                className="p-1 text-slate-500 hover:text-rose-700 hover:bg-rose-50 disabled:opacity-40 disabled:cursor-not-allowed rounded transition-colors"
                               >
-                                <Trash2 className="w-4 h-4" aria-hidden="true" />
+                                <Trash2 className="w-3.5 h-3.5" aria-hidden="true" />
                               </button>
                             </div>
                           </td>
@@ -568,21 +767,80 @@ export const LoansSettingsPage: React.FC<LoansSettingsPageProps> = ({
                 </table>
               </div>
             )}
-          </div>
+          </CollapsibleCard>
         </div>
       ) : activeTab === 'settings' ? (
         /* Settings Tab */
-        <fieldset disabled={!isAdmin} className="space-y-6 disabled:opacity-75">
-          {/* General & Statutory Allowances */}
-          <div className="bg-white border border-slate-200 rounded-lg p-6 space-y-5">
-            <div>
-              <h3 className="text-base font-semibold text-slate-900">
-                پارامترهای عمومی و مزایای قانونی کار
-              </h3>
-              <p className="text-xs text-slate-500 mt-0.5">
-                مقادیر زیر پایه محاسبه حقوق، مزایای مستمر و نرخ ساعتی کلیه کارمندان در دوره‌های مالی است.
-              </p>
+        <div className="space-y-6">
+          {/* Backup & Restore Section (outside admin-only fieldset so export always works cleanly) */}
+          <CollapsibleCard
+            title="پشتیبان‌گیری و بازیابی کامل سامانه (JSON)"
+            subtitle="خروجی فایل پشتیبان JSON از کل اطلاعات پرسنل، کارکرد، وام‌ها و تنظیمات و بازیابی سریع در صورت نیاز"
+            badge="پشتیبانی و بکاپ"
+            defaultOpen
+            resizable
+          >
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+              <div className="text-xs text-slate-600 leading-6">
+                برای نگهداری امن داده‌های شرکت مهندسی لک می‌توانید در هر زمان از تمامی اطلاعات فایل پشتیبان JSON تهیه کنید و در صورت نیاز توسط ادمین سیستم آن را بازیابی نمایید.
+              </div>
+              <div className="flex flex-wrap items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  disabled={!canManageBackup}
+                  onClick={handleDownloadJsonBackup}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-teal-800 bg-teal-50 border border-teal-200 hover:bg-teal-100 disabled:opacity-50 disabled:cursor-not-allowed rounded-md transition-colors whitespace-nowrap"
+                >
+                  <Download className="w-4 h-4" aria-hidden="true" />
+                  <span>دریافت بکاپ کامل (JSON)</span>
+                </button>
+                <button
+                  type="button"
+                  disabled={!canManageBackup}
+                  onClick={() => backupFileInputRef.current?.click()}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium text-slate-700 bg-white border border-slate-200 hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed rounded-md transition-colors whitespace-nowrap"
+                >
+                  <Upload className="w-4 h-4" aria-hidden="true" />
+                  <span>بازیابی از فایل بکاپ</span>
+                </button>
+                <input
+                  ref={backupFileInputRef}
+                  type="file"
+                  accept="application/json,.json"
+                  onChange={handleBackupFileChange}
+                  className="hidden"
+                  aria-label="بازیابی فایل پشتیبان JSON"
+                />
+              </div>
             </div>
+
+            {backupError && (
+              <div
+                role="alert"
+                className="mt-3 px-3 py-2 text-xs text-rose-700 bg-rose-50 border border-rose-200 rounded-md"
+              >
+                {backupError}
+              </div>
+            )}
+            {backupSuccess && (
+              <div
+                role="status"
+                className="mt-3 px-3 py-2 text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-md"
+              >
+                اطلاعات پشتیبان با موفقیت در سامانه بازیابی شد.
+              </div>
+            )}
+          </CollapsibleCard>
+
+          <fieldset disabled={!canManageSettings} className="space-y-6 disabled:opacity-75">
+            {/* General & Statutory Allowances */}
+            <CollapsibleCard
+              title="پارامترهای عمومی و مزایای قانونی کار"
+              subtitle="مقادیر زیر پایه محاسبه حقوق، مزایای مستمر و نرخ ساعتی کلیه کارمندان در دوره‌های مالی است."
+              defaultOpen
+              resizable
+              bodyClassName="space-y-5"
+            >
 
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
               <div>
@@ -735,18 +993,16 @@ export const LoansSettingsPage: React.FC<LoansSettingsPageProps> = ({
                 />
               </div>
             </div>
-          </div>
+            </CollapsibleCard>
 
-          {/* Dedicated Allowances for ماده ۲۸ and شرکتی سروش */}
-          <div className="bg-white border border-slate-200 rounded-lg p-6 space-y-5">
-            <div>
-              <h3 className="text-base font-semibold text-slate-900">
-                مزایای اختصاصی قراردادهای ماده ۲۸ و شرکتی سروش
-              </h3>
-              <p className="text-xs text-slate-500 mt-0.5">
-                مبالغ زیر به صورت مشخص برای کارمندان با نوع قرارداد «ماده ۲۸» و «شرکتی سروش» به عنوان حق مسکن، بن خواربار، حق عائله‌مندی، حق فرزند و سایر مزایای ثابت پرداخت می‌شود.
-              </p>
-            </div>
+            {/* Dedicated Allowances for ماده ۲۸ and شرکتی سروش */}
+            <CollapsibleCard
+              title="مزایای اختصاصی قراردادهای ماده ۲۸ و شرکتی سروش"
+              subtitle="مبالغ زیر برای کارمندان با نوع قرارداد «ماده ۲۸»، «شرکتی سروش» و بر اساس تیک‌های مجوز مزایای هر فرد پرداخت می‌شود."
+              defaultOpen
+              resizable
+              bodyClassName="space-y-5"
+            >
 
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
               <div>
@@ -881,83 +1137,108 @@ export const LoansSettingsPage: React.FC<LoansSettingsPageProps> = ({
                 پرداخت حق عائله‌مندی و حداقل یک سهم حق فرزند به تمام کارمندان ماده ۲۸ و شرکتی سروش
               </span>
             </label>
-          </div>
+            </CollapsibleCard>
 
-          {/* Multipliers & Insurance Rates */}
-          <div className="bg-white border border-slate-200 rounded-lg p-6 space-y-5">
-            <h3 className="text-base font-semibold text-slate-900">
-              ضرایب اضافه‌کاری و نرخ بیمه تامین اجتماعی
-            </h3>
+            {/* Multipliers, Day/Night Shift & Insurance Rates */}
+            <CollapsibleCard
+              title="تنظیمات نوبت‌کاری روز و شب، ضرایب اضافه‌کاری و نرخ بیمه"
+              subtitle="تنظیم ضریب شیفت روز، شب‌کاری، اضافه‌کاری و سقف بیمه تامین اجتماعی"
+              defaultOpen
+              resizable
+              bodyClassName="space-y-5"
+            >
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                <div>
+                  <label
+                    htmlFor="set-ot-mult"
+                    className="block text-xs font-medium text-slate-700 mb-1.5"
+                  >
+                    ضریب اضافه‌کاری (پیش‌فرض ۱.۴)
+                  </label>
+                  <input
+                    id="set-ot-mult"
+                    type="number"
+                    min={1}
+                    step={0.05}
+                    value={settings.overtimeMultiplier}
+                    onChange={(e) =>
+                      updateSettingField(
+                        'overtimeMultiplier',
+                        Math.max(0, Number(e.target.value) || 0)
+                      )
+                    }
+                    className="w-full px-3 py-2 text-sm border border-slate-200 rounded-md font-mono-num tabular-nums focus:outline-none focus:ring-2 focus:ring-teal-600/20 focus:border-teal-600"
+                  />
+                </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-              <div>
-                <label
-                  htmlFor="set-ot-mult"
-                  className="block text-xs font-medium text-slate-700 mb-1.5"
-                >
-                  ضریب اضافه‌کاری (پیش‌فرض ۱.۴)
-                </label>
-                <input
-                  id="set-ot-mult"
-                  type="number"
-                  min={1}
-                  step={0.05}
-                  value={settings.overtimeMultiplier}
-                  onChange={(e) =>
-                    updateSettingField(
-                      'overtimeMultiplier',
-                      Math.max(0, Number(e.target.value) || 0)
-                    )
-                  }
-                  className="w-full px-3 py-2 text-sm border border-slate-200 rounded-md font-mono-num tabular-nums focus:outline-none focus:ring-2 focus:ring-teal-600/20 focus:border-teal-600"
-                />
-              </div>
+                <div>
+                  <label
+                    htmlFor="set-hol-mult"
+                    className="block text-xs font-medium text-slate-700 mb-1.5"
+                  >
+                    ضریب تعطیل‌کاری / جمعه‌کاری
+                  </label>
+                  <input
+                    id="set-hol-mult"
+                    type="number"
+                    min={0}
+                    step={0.05}
+                    value={settings.holidayMultiplier}
+                    onChange={(e) =>
+                      updateSettingField(
+                        'holidayMultiplier',
+                        Math.max(0, Number(e.target.value) || 0)
+                      )
+                    }
+                    className="w-full px-3 py-2 text-sm border border-slate-200 rounded-md font-mono-num tabular-nums focus:outline-none focus:ring-2 focus:ring-teal-600/20 focus:border-teal-600"
+                  />
+                </div>
 
-              <div>
-                <label
-                  htmlFor="set-hol-mult"
-                  className="block text-xs font-medium text-slate-700 mb-1.5"
-                >
-                  ضریب تعطیل‌کاری / جمعه‌کاری
-                </label>
-                <input
-                  id="set-hol-mult"
-                  type="number"
-                  min={0}
-                  step={0.05}
-                  value={settings.holidayMultiplier}
-                  onChange={(e) =>
-                    updateSettingField(
-                      'holidayMultiplier',
-                      Math.max(0, Number(e.target.value) || 0)
-                    )
-                  }
-                  className="w-full px-3 py-2 text-sm border border-slate-200 rounded-md font-mono-num tabular-nums focus:outline-none focus:ring-2 focus:ring-teal-600/20 focus:border-teal-600"
-                />
-              </div>
+                <div>
+                  <label
+                    htmlFor="set-day-mult"
+                    className="block text-xs font-medium text-slate-700 mb-1.5"
+                  >
+                    ضریب نوبت‌کاری / شیفت روز (پیش‌فرض ۰.۱۵)
+                  </label>
+                  <input
+                    id="set-day-mult"
+                    type="number"
+                    min={0}
+                    step={0.01}
+                    value={settings.dayShiftMultiplier ?? 0.15}
+                    onChange={(e) =>
+                      updateSettingField(
+                        'dayShiftMultiplier',
+                        Math.max(0, Number(e.target.value) || 0)
+                      )
+                    }
+                    className="w-full px-3 py-2 text-sm border border-slate-200 rounded-md font-mono-num tabular-nums focus:outline-none focus:ring-2 focus:ring-teal-600/20 focus:border-teal-600"
+                  />
+                </div>
 
-              <div>
-                <label
-                  htmlFor="set-night-mult"
-                  className="block text-xs font-medium text-slate-700 mb-1.5"
-                >
-                  ضریب شب‌کاری (فوق‌العاده ۳۵٪ = ۰.۳۵)
-                </label>
-                <input
-                  id="set-night-mult"
-                  type="number"
-                  min={0}
-                  step={0.05}
-                  value={settings.nightShiftMultiplier}
-                  onChange={(e) =>
-                    updateSettingField(
-                      'nightShiftMultiplier',
-                      Math.max(0, Number(e.target.value) || 0)
-                    )
-                  }
-                  className="w-full px-3 py-2 text-sm border border-slate-200 rounded-md font-mono-num tabular-nums focus:outline-none focus:ring-2 focus:ring-teal-600/20 focus:border-teal-600"
-                />
-              </div>
+                <div>
+                  <label
+                    htmlFor="set-night-mult"
+                    className="block text-xs font-medium text-slate-700 mb-1.5"
+                  >
+                    ضریب نوبت‌کاری / شیفت شب (۳۵٪ = ۰.۳۵)
+                  </label>
+                  <input
+                    id="set-night-mult"
+                    type="number"
+                    min={0}
+                    step={0.05}
+                    value={settings.nightShiftMultiplier}
+                    onChange={(e) =>
+                      updateSettingField(
+                        'nightShiftMultiplier',
+                        Math.max(0, Number(e.target.value) || 0)
+                      )
+                    }
+                    className="w-full px-3 py-2 text-sm border border-slate-200 rounded-md font-mono-num tabular-nums focus:outline-none focus:ring-2 focus:ring-teal-600/20 focus:border-teal-600"
+                  />
+                </div>
 
               <div>
                 <label
@@ -1030,28 +1311,26 @@ export const LoansSettingsPage: React.FC<LoansSettingsPageProps> = ({
                 />
               </div>
             </div>
-          </div>
+            </CollapsibleCard>
 
-          {/* Progressive Tax Brackets */}
-          <div className="bg-white border border-slate-200 rounded-lg p-6 space-y-4">
-            <div className="flex items-center justify-between gap-3">
-              <div>
-                <h3 className="text-base font-semibold text-slate-900">
-                  جدول پلکانی مالیات بر درآمد حقوق (ماهانه)
-                </h3>
-                <p className="text-xs text-slate-500 mt-0.5">
-                  مالیات هر کارمند به صورت پلکانی بر اساس درآمد مشمول مالیات محاسبه می‌شود.
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={addBracket}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-teal-800 bg-teal-50 border border-teal-200 hover:bg-teal-100 rounded-md transition-colors whitespace-nowrap shrink-0"
-              >
-                <Plus className="w-3.5 h-3.5" aria-hidden="true" />
-                <span>افزودن پله</span>
-              </button>
-            </div>
+            {/* Progressive Tax Brackets */}
+            <CollapsibleCard
+              title="جدول پلکانی مالیات بر درآمد حقوق (ماهانه)"
+              subtitle="مالیات هر کارمند به صورت پلکانی بر اساس درآمد مشمول مالیات محاسبه می‌شود."
+              defaultOpen
+              resizable
+              headerActions={
+                <button
+                  type="button"
+                  onClick={addBracket}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-teal-800 bg-teal-50 border border-teal-200 hover:bg-teal-100 rounded-md transition-colors whitespace-nowrap shrink-0"
+                >
+                  <Plus className="w-3.5 h-3.5" aria-hidden="true" />
+                  <span>افزودن پله</span>
+                </button>
+              }
+              bodyClassName="space-y-4"
+            >
 
             <div className="overflow-x-auto">
               <table className="w-full text-right border-collapse">
@@ -1132,8 +1411,9 @@ export const LoansSettingsPage: React.FC<LoansSettingsPageProps> = ({
                 </tbody>
               </table>
             </div>
-          </div>
-        </fieldset>
+            </CollapsibleCard>
+          </fieldset>
+        </div>
       ) : (
         /* Users & Access Control Tab */
         <div className="space-y-5">
@@ -1155,23 +1435,21 @@ export const LoansSettingsPage: React.FC<LoansSettingsPageProps> = ({
               </p>
             </div>
             <div className="bg-white border border-slate-200 rounded-lg px-5 py-4">
-              <p className="text-xs text-slate-500 font-medium">کاربران عادی (نفر دوم)</p>
+              <p className="text-xs text-slate-500 font-medium">کاربران عادی (دسترسی سفارشی)</p>
               <p className="mt-1.5 text-2xl font-semibold text-slate-900 font-mono-num tabular-nums">
                 {toPersianDigits(users.filter((u) => u.role === 'viewer').length)}{' '}
-                <span className="text-xs font-normal text-slate-500">فقط مشاهده</span>
+                <span className="text-xs font-normal text-slate-500">با مجوزهای تعریف‌شده توسط مدیر سیستم</span>
               </p>
             </div>
           </div>
 
-          <div className="bg-white border border-slate-200 rounded-lg overflow-hidden">
-            <div className="px-5 py-4 border-b border-slate-200 bg-slate-50/70">
-              <h3 className="text-sm font-semibold text-slate-900">
-                فهرست کاربران و سطوح دسترسی سامانه
-              </h3>
-              <p className="text-xs text-slate-500 mt-0.5">
-                فقط ادمین سیستم مجاز به اعمال تغییر در اطلاعات پرسنل، حقوق، وام‌ها و تعریف کاربر جدید است. کاربران عادی فقط امکان مشاهده و دریافت گزارش را دارند.
-              </p>
-            </div>
+          <CollapsibleCard
+            title="فهرست کاربران و سطوح دسترسی سامانه"
+            subtitle="مدیر سیستم دسترسی کامل به تمام بخش‌ها دارد و می‌تواند برای هر کاربر عادی دقیقاً مشخص کند به کدام بخش‌ها دسترسی داشته باشد."
+            badge={`${toPersianDigits(users.length)} کاربر`}
+            resizable
+            bodyClassName="p-0"
+          >
 
             <div className="overflow-x-auto">
               <table className="w-full text-right border-collapse">
@@ -1179,7 +1457,7 @@ export const LoansSettingsPage: React.FC<LoansSettingsPageProps> = ({
                   <tr className="border-b border-slate-200 bg-slate-50 text-xs font-medium text-slate-500">
                     <th className="py-3 px-4 whitespace-nowrap">نام و نام خانوادگی</th>
                     <th className="py-3 px-4 whitespace-nowrap">نام کاربری</th>
-                    <th className="py-3 px-4 whitespace-nowrap">نقش و سطح دسترسی</th>
+                    <th className="py-3 px-4 whitespace-nowrap">نقش و اختیارات کاربر</th>
                     <th className="py-3 px-4 whitespace-nowrap">وضعیت</th>
                     <th className="py-3 px-4 whitespace-nowrap">تاریخ ایجاد</th>
                     <th className="py-3 px-4 whitespace-nowrap text-left">عملیات</th>
@@ -1190,6 +1468,10 @@ export const LoansSettingsPage: React.FC<LoansSettingsPageProps> = ({
                     const isSelf = u.id === currentUserId;
                     const isLastActiveAdmin =
                       u.isActive && u.role === 'admin' && activeAdminCount <= 1;
+                    const effectivePerms = getEffectiveUserPermissions(u);
+                    const grantedLabels = USER_PERMISSION_ITEMS.filter(
+                      (item) => effectivePerms[item.key]
+                    ).map((item) => item.label);
 
                     return (
                       <tr key={u.id} className="hover:bg-slate-50/70">
@@ -1209,15 +1491,37 @@ export const LoansSettingsPage: React.FC<LoansSettingsPageProps> = ({
                         >
                           {u.username}
                         </td>
-                        <td className="py-3 px-4 whitespace-nowrap">
-                          <span
+                        <td className="py-3 px-4">
+                          <div
                             className={`inline-flex items-center gap-1.5 text-xs font-medium ${
-                              u.role === 'admin' ? 'text-teal-800' : 'text-slate-600'
+                              u.role === 'admin' ? 'text-teal-800' : 'text-slate-700'
                             }`}
                           >
-                            <Shield className="w-3.5 h-3.5" aria-hidden="true" />
+                            <Shield className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
                             <span>{USER_ROLE_LABELS[u.role]}</span>
-                          </span>
+                          </div>
+                          {u.role === 'admin' ? (
+                            <div className="mt-1 text-[11px] text-teal-700">
+                              دسترسی کامل به کلیه عملیات، تعریف کاربر و تنظیمات
+                            </div>
+                          ) : (
+                            <div className="mt-1.5 flex flex-wrap gap-1 max-w-md">
+                              {grantedLabels.length === 0 ? (
+                                <span className="text-[11px] text-rose-600">
+                                  بدون مجوز عملیات (فقط مشاهده اولیه)
+                                </span>
+                              ) : (
+                                grantedLabels.map((label) => (
+                                  <span
+                                    key={label}
+                                    className="inline-block px-1.5 py-0.5 text-[10px] font-medium bg-slate-100 text-slate-700 border border-slate-200 rounded"
+                                  >
+                                    {label}
+                                  </span>
+                                ))
+                              )}
+                            </div>
+                          )}
                         </td>
                         <td className="py-3 px-4 whitespace-nowrap">
                           <button
@@ -1243,20 +1547,37 @@ export const LoansSettingsPage: React.FC<LoansSettingsPageProps> = ({
                         </td>
                         <td className="py-3 px-4 whitespace-nowrap text-left">
                           <div className="inline-flex items-center gap-2">
+                            {u.role === 'viewer' && (
+                              <button
+                                type="button"
+                                disabled={!isAdmin}
+                                onClick={() => openPermissionsModal(u)}
+                                className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-teal-800 bg-teal-50 hover:bg-teal-100 border border-teal-200 disabled:opacity-40 disabled:cursor-not-allowed rounded transition-colors"
+                              >
+                                <SlidersHorizontal className="w-3.5 h-3.5" aria-hidden="true" />
+                                <span>تعیین دسترسی‌ها</span>
+                              </button>
+                            )}
+
                             <select
                               aria-label={`تغییر نقش ${u.fullName}`}
                               disabled={!isAdmin || isSelf || isLastActiveAdmin}
                               value={u.role}
-                              onChange={(e) =>
+                              onChange={(e) => {
+                                const nextRole = e.target.value as UserRole;
                                 onUpdateUser({
                                   ...u,
-                                  role: e.target.value as UserRole,
-                                })
-                              }
+                                  role: nextRole,
+                                  permissions:
+                                    nextRole === 'admin'
+                                      ? { ...DEFAULT_ADMIN_PERMISSIONS }
+                                      : u.permissions ?? { ...DEFAULT_VIEWER_PERMISSIONS },
+                                });
+                              }}
                               className="px-2.5 py-1 text-xs border border-slate-200 rounded bg-white disabled:bg-slate-50 disabled:text-slate-400"
                             >
-                              <option value="admin">ادمین سیستم</option>
-                              <option value="viewer">کاربر عادی (فقط مشاهده)</option>
+                              <option value="admin">مدیر سیستم</option>
+                              <option value="viewer">کاربر عادی (دسترسی سفارشی)</option>
                             </select>
 
                             <button
@@ -1276,11 +1597,11 @@ export const LoansSettingsPage: React.FC<LoansSettingsPageProps> = ({
                 </tbody>
               </table>
             </div>
-          </div>
+          </CollapsibleCard>
         </div>
       )}
 
-      {/* Add Loan Modal */}
+      {/* Add / Edit Loan Modal */}
       {isLoanModalOpen && (
         <div
           className="fixed inset-0 z-50 bg-slate-900/40 flex items-center justify-center p-4"
@@ -1294,11 +1615,16 @@ export const LoansSettingsPage: React.FC<LoansSettingsPageProps> = ({
                 id="loan-modal-title"
                 className="text-base font-semibold text-slate-900"
               >
-                ثبت وام جدید برای کارمند
+                {editingLoan
+                  ? `ویرایش وام: ${editingLoan.title}`
+                  : 'ثبت وام جدید برای کارمند'}
               </h2>
               <button
                 type="button"
-                onClick={() => setIsLoanModalOpen(false)}
+                onClick={() => {
+                  setIsLoanModalOpen(false);
+                  setEditingLoan(null);
+                }}
                 aria-label="بستن پنجره وام"
                 className="p-1.5 text-slate-400 hover:text-slate-700 rounded transition-colors"
               >
@@ -1374,7 +1700,9 @@ export const LoansSettingsPage: React.FC<LoansSettingsPageProps> = ({
                       setLoanForm((f) => ({
                         ...f,
                         totalAmount: val,
-                        remainingBalance: val,
+                        remainingBalance: editingLoan
+                          ? Math.min(val, f.remainingBalance)
+                          : val,
                       }));
                     }}
                     className="w-full px-3 py-2 text-sm border border-slate-200 rounded-md font-mono-num tabular-nums focus:outline-none focus:ring-2 focus:ring-teal-600/20 focus:border-teal-600"
@@ -1460,10 +1788,39 @@ export const LoansSettingsPage: React.FC<LoansSettingsPageProps> = ({
                 </div>
               </div>
 
+              {editingLoan && (
+                <div>
+                  <label
+                    htmlFor="loan-status-edit"
+                    className="block text-xs font-medium text-slate-700 mb-1.5"
+                  >
+                    وضعیت وام
+                  </label>
+                  <select
+                    id="loan-status-edit"
+                    value={loanForm.status}
+                    onChange={(e) =>
+                      setLoanForm((f) => ({
+                        ...f,
+                        status: e.target.value as LoanStatus,
+                      }))
+                    }
+                    className="w-full px-3 py-2 text-sm border border-slate-200 rounded-md bg-white focus:outline-none focus:ring-2 focus:ring-teal-600/20 focus:border-teal-600"
+                  >
+                    <option value="active">در حال بازپرداخت</option>
+                    <option value="paused">متوقف</option>
+                    <option value="settled">تسویه‌شده</option>
+                  </select>
+                </div>
+              )}
+
               <div className="flex justify-end gap-2 pt-4 border-t border-slate-200">
                 <button
                   type="button"
-                  onClick={() => setIsLoanModalOpen(false)}
+                  onClick={() => {
+                    setIsLoanModalOpen(false);
+                    setEditingLoan(null);
+                  }}
                   className="px-4 py-2 text-sm font-medium text-slate-700 bg-white border border-slate-200 hover:bg-slate-50 rounded-md transition-colors"
                 >
                   انصراف
@@ -1472,7 +1829,138 @@ export const LoansSettingsPage: React.FC<LoansSettingsPageProps> = ({
                   type="submit"
                   className="px-4 py-2 text-sm font-medium text-white bg-teal-700 hover:bg-teal-800 rounded-md transition-colors"
                 >
-                  ثبت وام
+                  {editingLoan ? 'ذخیره تغییرات وام' : 'ثبت وام'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Pay Loan Modal (Custom Payment / Settlement) */}
+      {payingLoan && (
+        <div
+          className="fixed inset-0 z-50 bg-slate-900/40 flex items-center justify-center p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="pay-loan-modal-title"
+        >
+          <div className="bg-white border border-slate-200 rounded-lg w-full max-w-md shadow-lg">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200">
+              <div>
+                <h2
+                  id="pay-loan-modal-title"
+                  className="text-base font-semibold text-slate-900"
+                >
+                  پرداخت وام و ثبت واریز
+                </h2>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  {employeeMap.get(payingLoan.employeeId)?.fullName ?? 'کارمند'} —{' '}
+                  {payingLoan.title}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPayingLoan(null)}
+                aria-label="بستن پنجره پرداخت وام"
+                className="p-1.5 text-slate-400 hover:text-slate-700 rounded transition-colors"
+              >
+                <X className="w-5 h-5" aria-hidden="true" />
+              </button>
+            </div>
+
+            <form onSubmit={handlePayLoanSubmit} className="p-6 space-y-4" noValidate>
+              <div className="p-3 bg-slate-50 border border-slate-200 rounded-md flex items-center justify-between text-xs">
+                <span className="text-slate-600">مانده فعلی بدهی وام:</span>
+                <strong className="font-mono-num tabular-nums text-slate-900">
+                  {formatMoney(payingLoan.remainingBalance)} {settings.currency}
+                </strong>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2 text-[11px]">
+                <button
+                  type="button"
+                  onClick={() =>
+                    setPayLoanAmountInput(
+                      String(
+                        Math.min(
+                          payingLoan.monthlyInstallment,
+                          payingLoan.remainingBalance
+                        )
+                      )
+                    )
+                  }
+                  className="px-2.5 py-1 bg-teal-50 text-teal-800 border border-teal-200 hover:bg-teal-100 rounded transition-colors"
+                >
+                  معادل ۱ قسط ({formatMoney(payingLoan.monthlyInstallment)})
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setPayLoanAmountInput(String(payingLoan.remainingBalance))
+                  }
+                  className="px-2.5 py-1 bg-emerald-50 text-emerald-800 border border-emerald-200 hover:bg-emerald-100 rounded transition-colors"
+                >
+                  تسویه کامل مانده ({formatMoney(payingLoan.remainingBalance)})
+                </button>
+              </div>
+
+              <div>
+                <label
+                  htmlFor="pay-loan-amount"
+                  className="block text-xs font-medium text-slate-700 mb-1.5"
+                >
+                  مبلغ پرداختی ({settings.currency}) *
+                </label>
+                <input
+                  id="pay-loan-amount"
+                  type="text"
+                  inputMode="numeric"
+                  dir="ltr"
+                  value={payLoanAmountInput}
+                  onChange={(e) => {
+                    setPayLoanAmountInput(e.target.value);
+                    setPayLoanError(null);
+                  }}
+                  className="w-full px-3 py-2 text-sm border border-slate-200 rounded-md font-mono-num tabular-nums text-left focus:outline-none focus:ring-2 focus:ring-teal-600/20 focus:border-teal-600"
+                />
+                <div className="mt-1.5 flex items-center justify-between text-[11px] text-slate-500 font-mono-num tabular-nums">
+                  <span>
+                    مبلغ واریز: {formatMoney(parseNumericInput(payLoanAmountInput))}{' '}
+                    {settings.currency}
+                  </span>
+                  <span>
+                    مانده پس از پرداخت:{' '}
+                    <strong className="text-teal-800">
+                      {formatMoney(
+                        Math.max(
+                          0,
+                          payingLoan.remainingBalance -
+                            parseNumericInput(payLoanAmountInput)
+                        )
+                      )}{' '}
+                      {settings.currency}
+                    </strong>
+                  </span>
+                </div>
+                {payLoanError && (
+                  <p className="mt-1 text-xs text-rose-600">{payLoanError}</p>
+                )}
+              </div>
+
+              <div className="flex justify-end gap-2 pt-3 border-t border-slate-200">
+                <button
+                  type="button"
+                  onClick={() => setPayingLoan(null)}
+                  className="px-4 py-2 text-sm font-medium text-slate-700 bg-white border border-slate-200 hover:bg-slate-50 rounded-md transition-colors"
+                >
+                  انصراف
+                </button>
+                <button
+                  type="submit"
+                  className="px-4 py-2 text-sm font-medium text-white bg-emerald-700 hover:bg-emerald-800 rounded-md transition-colors"
+                >
+                  ثبت پرداخت وام
                 </button>
               </div>
             </form>
@@ -1488,7 +1976,7 @@ export const LoansSettingsPage: React.FC<LoansSettingsPageProps> = ({
           aria-modal="true"
           aria-labelledby="user-modal-title"
         >
-          <div className="bg-white border border-slate-200 rounded-lg w-full max-w-md shadow-lg">
+          <div className="bg-white border border-slate-200 rounded-lg w-full max-w-xl max-h-[90vh] overflow-y-auto shadow-lg">
             <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200">
               <h2
                 id="user-modal-title"
@@ -1521,7 +2009,7 @@ export const LoansSettingsPage: React.FC<LoansSettingsPageProps> = ({
                   onChange={(e) =>
                     setUserForm((f) => ({ ...f, fullName: e.target.value }))
                   }
-                  placeholder="مثلاً سارا احمدی (کاربر دوم)"
+                  placeholder="مثلاً محمدمهدی کریمی"
                   className="w-full px-3 py-2 text-sm border border-slate-200 rounded-md focus:outline-none focus:ring-2 focus:ring-teal-600/20 focus:border-teal-600"
                 />
                 {userErrors.fullName && (
@@ -1529,50 +2017,52 @@ export const LoansSettingsPage: React.FC<LoansSettingsPageProps> = ({
                 )}
               </div>
 
-              <div>
-                <label
-                  htmlFor="new-user-username"
-                  className="block text-xs font-medium text-slate-700 mb-1.5"
-                >
-                  نام کاربری (انگلیسی) *
-                </label>
-                <input
-                  id="new-user-username"
-                  type="text"
-                  dir="ltr"
-                  value={userForm.username}
-                  onChange={(e) =>
-                    setUserForm((f) => ({ ...f, username: e.target.value }))
-                  }
-                  placeholder="sara.user"
-                  className="w-full px-3 py-2 text-sm border border-slate-200 rounded-md font-mono-num text-left focus:outline-none focus:ring-2 focus:ring-teal-600/20 focus:border-teal-600"
-                />
-                {userErrors.username && (
-                  <p className="mt-1 text-xs text-rose-600">{userErrors.username}</p>
-                )}
-              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label
+                    htmlFor="new-user-username"
+                    className="block text-xs font-medium text-slate-700 mb-1.5"
+                  >
+                    نام کاربری (انگلیسی) *
+                  </label>
+                  <input
+                    id="new-user-username"
+                    type="text"
+                    dir="ltr"
+                    value={userForm.username}
+                    onChange={(e) =>
+                      setUserForm((f) => ({ ...f, username: e.target.value }))
+                    }
+                    placeholder="sara.user"
+                    className="w-full px-3 py-2 text-sm border border-slate-200 rounded-md font-mono-num text-left focus:outline-none focus:ring-2 focus:ring-teal-600/20 focus:border-teal-600"
+                  />
+                  {userErrors.username && (
+                    <p className="mt-1 text-xs text-rose-600">{userErrors.username}</p>
+                  )}
+                </div>
 
-              <div>
-                <label
-                  htmlFor="new-user-password"
-                  className="block text-xs font-medium text-slate-700 mb-1.5"
-                >
-                  رمز عبور (حداقل ۴ کاراکتر) *
-                </label>
-                <input
-                  id="new-user-password"
-                  type="password"
-                  dir="ltr"
-                  value={userForm.password}
-                  onChange={(e) =>
-                    setUserForm((f) => ({ ...f, password: e.target.value }))
-                  }
-                  placeholder="1234"
-                  className="w-full px-3 py-2 text-sm border border-slate-200 rounded-md font-mono-num text-left focus:outline-none focus:ring-2 focus:ring-teal-600/20 focus:border-teal-600"
-                />
-                {userErrors.password && (
-                  <p className="mt-1 text-xs text-rose-600">{userErrors.password}</p>
-                )}
+                <div>
+                  <label
+                    htmlFor="new-user-password"
+                    className="block text-xs font-medium text-slate-700 mb-1.5"
+                  >
+                    رمز عبور (حداقل ۴ کاراکتر) *
+                  </label>
+                  <input
+                    id="new-user-password"
+                    type="password"
+                    dir="ltr"
+                    value={userForm.password}
+                    onChange={(e) =>
+                      setUserForm((f) => ({ ...f, password: e.target.value }))
+                    }
+                    placeholder="1234"
+                    className="w-full px-3 py-2 text-sm border border-slate-200 rounded-md font-mono-num text-left focus:outline-none focus:ring-2 focus:ring-teal-600/20 focus:border-teal-600"
+                  />
+                  {userErrors.password && (
+                    <p className="mt-1 text-xs text-rose-600">{userErrors.password}</p>
+                  )}
+                </div>
               </div>
 
               <div>
@@ -1580,7 +2070,7 @@ export const LoansSettingsPage: React.FC<LoansSettingsPageProps> = ({
                   htmlFor="new-user-role"
                   className="block text-xs font-medium text-slate-700 mb-1.5"
                 >
-                  نقش و سطح دسترسی
+                  نقش کاربری
                 </label>
                 <select
                   id="new-user-role"
@@ -1590,10 +2080,91 @@ export const LoansSettingsPage: React.FC<LoansSettingsPageProps> = ({
                   }
                   className="w-full px-3 py-2 text-sm border border-slate-200 rounded-md bg-white focus:outline-none focus:ring-2 focus:ring-teal-600/20 focus:border-teal-600"
                 >
-                  <option value="viewer">کاربر عادی / نفر دوم (فقط مشاهده)</option>
-                  <option value="admin">ادمین سیستم (دسترسی کامل به تغییرات)</option>
+                  <option value="viewer">کاربر عادی (دسترسی سفارشی به انتخاب مدیر سیستم)</option>
+                  <option value="admin">مدیر سیستم (دسترسی کامل به کل سامانه)</option>
                 </select>
               </div>
+
+              {userForm.role === 'viewer' && (
+                <div className="border border-slate-200 rounded-lg p-3.5 bg-slate-50/70 space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-xs font-semibold text-slate-800">
+                      تعیین کارهایی که این کاربر مجاز به انجام آن‌هاست:
+                    </span>
+                    <div className="flex items-center gap-2 text-[11px]">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setUserForm((f) => ({
+                            ...f,
+                            permissions: { ...DEFAULT_ADMIN_PERMISSIONS },
+                          }))
+                        }
+                        className="text-teal-700 hover:underline font-medium"
+                      >
+                        انتخاب همه
+                      </button>
+                      <span className="text-slate-300">|</span>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setUserForm((f) => ({
+                            ...f,
+                            permissions: { ...DEFAULT_VIEWER_PERMISSIONS },
+                          }))
+                        }
+                        className="text-slate-600 hover:underline font-medium"
+                      >
+                        حالت پیش‌فرض
+                      </button>
+                      <span className="text-slate-300">|</span>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setUserForm((f) => ({
+                            ...f,
+                            permissions: { ...EMPTY_USER_PERMISSIONS },
+                          }))
+                        }
+                        className="text-rose-700 hover:underline font-medium"
+                      >
+                        حذف همه
+                      </button>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    {USER_PERMISSION_ITEMS.map((item) => (
+                      <label
+                        key={item.key}
+                        className="flex items-start gap-2 p-2 rounded-md bg-white border border-slate-200 cursor-pointer hover:border-teal-300 transition-colors"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={userForm.permissions[item.key]}
+                          onChange={(e) =>
+                            setUserForm((f) => ({
+                              ...f,
+                              permissions: {
+                                ...f.permissions,
+                                [item.key]: e.target.checked,
+                              },
+                            }))
+                          }
+                          className="mt-0.5 w-3.5 h-3.5 accent-teal-700 rounded shrink-0"
+                        />
+                        <div className="min-w-0">
+                          <div className="text-xs font-medium text-slate-900">
+                            {item.label}
+                          </div>
+                          <div className="text-[10px] text-slate-500 mt-0.5 leading-4">
+                            {item.description}
+                          </div>
+                        </div>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              )}
 
               <div className="flex justify-end gap-2 pt-4 border-t border-slate-200">
                 <button
@@ -1608,6 +2179,134 @@ export const LoansSettingsPage: React.FC<LoansSettingsPageProps> = ({
                   className="px-4 py-2 text-sm font-medium text-white bg-teal-700 hover:bg-teal-800 rounded-md transition-colors"
                 >
                   ثبت کاربر
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Edit User Permissions Modal */}
+      {editingPermissionsUser && (
+        <div
+          className="fixed inset-0 z-50 bg-slate-900/40 flex items-center justify-center p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="permissions-modal-title"
+        >
+          <div className="bg-white border border-slate-200 rounded-lg w-full max-w-xl max-h-[90vh] overflow-y-auto shadow-lg">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200">
+              <div>
+                <h2
+                  id="permissions-modal-title"
+                  className="text-base font-semibold text-slate-900"
+                >
+                  تعیین سطوح دسترسی برای {editingPermissionsUser.fullName}
+                </h2>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  نام کاربری:{' '}
+                  <span className="font-mono-num" dir="ltr">
+                    {editingPermissionsUser.username}
+                  </span>
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEditingPermissionsUser(null)}
+                aria-label="بستن پنجره سطح دسترسی"
+                className="p-1.5 text-slate-400 hover:text-slate-700 rounded transition-colors"
+              >
+                <X className="w-5 h-5" aria-hidden="true" />
+              </button>
+            </div>
+
+            <form
+              onSubmit={handleSaveUserPermissions}
+              className="p-6 space-y-4"
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                <span className="font-medium text-slate-700">
+                  مشخص کنید این کاربر چه عملیات‌هایی را بتواند انجام دهد:
+                </span>
+                <div className="flex items-center gap-2 text-[11px]">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setEditingPermissionsDraft({ ...DEFAULT_ADMIN_PERMISSIONS })
+                    }
+                    className="text-teal-700 hover:underline font-medium"
+                  >
+                    انتخاب همه
+                  </button>
+                  <span className="text-slate-300">|</span>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setEditingPermissionsDraft({ ...DEFAULT_VIEWER_PERMISSIONS })
+                    }
+                    className="text-slate-600 hover:underline font-medium"
+                  >
+                    حالت پیش‌فرض
+                  </button>
+                  <span className="text-slate-300">|</span>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setEditingPermissionsDraft({ ...EMPTY_USER_PERMISSIONS })
+                    }
+                    className="text-rose-700 hover:underline font-medium"
+                  >
+                    حذف همه
+                  </button>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                {USER_PERMISSION_ITEMS.map((item) => (
+                  <label
+                    key={item.key}
+                    className={`flex items-start gap-2.5 p-3 rounded-md border cursor-pointer transition-colors ${
+                      editingPermissionsDraft[item.key]
+                        ? 'bg-teal-50/50 border-teal-300'
+                        : 'bg-white border-slate-200 hover:bg-slate-50'
+                    }`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={editingPermissionsDraft[item.key]}
+                      onChange={(e) =>
+                        setEditingPermissionsDraft((prev) => ({
+                          ...prev,
+                          [item.key]: e.target.checked,
+                        }))
+                      }
+                      className="mt-0.5 w-4 h-4 accent-teal-700 rounded shrink-0"
+                    />
+                    <div className="min-w-0">
+                      <div className="text-xs font-semibold text-slate-900">
+                        {item.label}
+                      </div>
+                      <div className="text-[11px] text-slate-500 mt-0.5 leading-4">
+                        {item.description}
+                      </div>
+                    </div>
+                  </label>
+                ))}
+              </div>
+
+              <div className="flex justify-end gap-2 pt-4 border-t border-slate-200">
+                <button
+                  type="button"
+                  onClick={() => setEditingPermissionsUser(null)}
+                  className="px-4 py-2 text-sm font-medium text-slate-700 bg-white border border-slate-200 hover:bg-slate-50 rounded-md transition-colors"
+                >
+                  انصراف
+                </button>
+                <button
+                  type="submit"
+                  className="px-4 py-2 text-sm font-medium text-white bg-teal-700 hover:bg-teal-800 rounded-md transition-colors"
+                >
+                  ذخیره سطوح دسترسی
                 </button>
               </div>
             </form>

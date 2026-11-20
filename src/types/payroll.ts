@@ -1,15 +1,31 @@
-export type PageId = 'employees' | 'payroll-data' | 'loans-settings' | 'reports';
+export type PageId =
+  | 'employees'
+  | 'payroll-data'
+  | 'loans-settings'
+  | 'manual-salary-2'
+  | 'salary-tiers'
+  | 'reports';
 
 export type EmploymentType =
   | 'employed'
   | 'retired'
   | 'article-28'
   | 'article-38'
-  | 'sherkati-soroush';
+  | 'sherkati-soroush'
+  | 'custom';
+export type SalaryCalculationMode = 'manual' | 'fixed' | 'daily-divided';
 export type MaritalStatus = 'single' | 'married';
 export type CurrencyUnit = 'تومان' | 'ریال';
 export type LoanStatus = 'active' | 'paused' | 'settled';
 export type ManualSalaryMode = 'additional' | 'override';
+
+export interface EmployeeAllowanceFlags {
+  housing: boolean;
+  food: boolean;
+  marital: boolean;
+  child: boolean;
+  otherFixed: boolean;
+}
 
 export interface ManualSalaryPayment {
   id: string;
@@ -20,6 +36,14 @@ export interface ManualSalaryPayment {
   paymentDate: string;
   description: string;
   referenceCode: string;
+  unitType?: string;
+  workLocation?: string;
+  hazardPay?: number;
+  nonCalloutPay?: number;
+  terminationDate?: string;
+  secondSalaryBonus?: number;
+  deduction1?: number;
+  commuteAllowance?: number;
   createdAt: string;
 }
 
@@ -39,8 +63,14 @@ export interface Employee {
   mobileNumber: string;
   workPhone: string;
   employmentType: EmploymentType;
+  customContractTitle?: string;
+  salaryCalculationMode?: SalaryCalculationMode;
+  allowanceFlags?: EmployeeAllowanceFlags;
   baseMonthlySalary: number;
+  seniorityAllowance?: number;
+  insuranceBaseCap?: number;
   manualSalaries?: number[];
+  customTierAmounts?: Record<string, number>;
   maritalStatus: MaritalStatus;
   childrenCount: number;
   bankName: string;
@@ -57,6 +87,7 @@ export interface MonthlyTimesheet {
   enteredSalary?: number;
   overtimeHours: number;
   holidayHours: number;
+  dayShiftHours?: number;
   nightShiftHours: number;
   absentDays: number;
   missionAllowance: number;
@@ -105,6 +136,7 @@ export interface PayrollSettings {
   childAllowancePerChild: number;
   overtimeMultiplier: number;
   holidayMultiplier: number;
+  dayShiftMultiplier?: number;
   nightShiftMultiplier: number;
   employeeInsuranceRate: number; // e.g. 7
   employerInsuranceRate: number; // e.g. 23
@@ -122,6 +154,7 @@ export interface ComputedPayslip {
   dailyWage: number;
   soroushEnteredSalary: number;
   baseSalaryEarned: number;
+  seniorityEarned: number;
   housingEarned: number;
   foodEarned: number;
   maritalEarned: number;
@@ -129,6 +162,7 @@ export interface ComputedPayslip {
   specialFixedAllowanceEarned: number;
   overtimePay: number;
   holidayPay: number;
+  dayShiftPay: number;
   nightShiftPay: number;
   missionAllowance: number;
   bonus: number;
@@ -180,6 +214,18 @@ export interface PayrollReport {
 
 export type UserRole = 'admin' | 'viewer';
 
+export interface UserPermissions {
+  manageEmployees: boolean;
+  enterTimesheets: boolean;
+  manageLoans: boolean;
+  manageSettings: boolean;
+  enterManualSalary: boolean;
+  enterManualSalary2: boolean;
+  enterSalaryTiers: boolean;
+  manageBackup: boolean;
+  viewReports: boolean;
+}
+
 export interface SystemUser {
   id: string;
   fullName: string;
@@ -188,6 +234,7 @@ export interface SystemUser {
   role: UserRole;
   isActive: boolean;
   createdAt: string;
+  permissions?: UserPermissions;
 }
 
 export type ParametricFieldId =
@@ -198,6 +245,7 @@ export type ParametricFieldId =
   | 'jobTitle'
   | 'workLocation'
   | 'employmentType'
+  | 'salaryCalculationMode'
   | 'maritalStatus'
   | 'childrenCount'
   | 'hireDate'
@@ -214,12 +262,18 @@ export type ParametricFieldId =
   | 'holidayHours'
   | 'nightShiftHours'
   | 'baseMonthlySalary'
+  | 'seniorityAllowance'
+  | 'insuranceBaseCap'
   | 'manualSalary1'
   | 'manualSalary2'
   | 'manualSalary3'
   | 'manualSalary4'
   | 'manualSalary5'
+  | 'manualSalary6'
+  | 'manualSalary7'
+  | 'manualSalary8'
   | 'baseSalaryEarned'
+  | 'seniorityEarned'
   | 'housingEarned'
   | 'foodEarned'
   | 'maritalEarned'
@@ -227,6 +281,7 @@ export type ParametricFieldId =
   | 'specialFixedAllowanceEarned'
   | 'overtimePay'
   | 'holidayPay'
+  | 'dayShiftPay'
   | 'nightShiftPay'
   | 'missionAllowance'
   | 'bonus'
@@ -257,6 +312,8 @@ export interface ParametricReportFilters {
   searchQuery: string;
   department: string;
   employmentType: EmploymentType | 'all';
+  selectedDepartments?: ReadonlyArray<string>;
+  selectedContracts?: ReadonlyArray<EmploymentType>;
   bankName: string;
   includeInactive: boolean;
   minNetPayable: string;
